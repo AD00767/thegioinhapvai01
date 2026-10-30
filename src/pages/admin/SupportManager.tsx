@@ -5,11 +5,8 @@ import {
   CheckCircle, Trash2, Reply, Search,
   Filter, MoreVertical, X, ExternalLink
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, 
-  orderBy, where, serverTimestamp, deleteDoc, addDoc 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import toast from 'react-hot-toast';
@@ -30,13 +27,14 @@ export default function SupportManager() {
   const fetchTickets = async () => {
     setLoading(true);
     try {
-      const q = query(
-        collection(db, 'contact_forms'), 
-        where('status', '==', filter),
-        orderBy('createdAt', 'desc')
-      );
-      const snap = await getDocs(q);
-      setTickets(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const { data, error } = await supabase
+        .from('contact_forms')
+        .select('*')
+        .eq('status', filter)
+        .order('createdAt', { ascending: false });
+
+      if (error) throw error;
+      setTickets(data || []);
     } catch (err) {
       console.error("Error fetching tickets:", err);
       toast.error("Không thể tải danh sách yêu cầu.");
@@ -52,18 +50,20 @@ export default function SupportManager() {
     }
     
     try {
-      const ticketRef = doc(db, 'contact_forms', selectedTicket.id);
-      await updateDoc(ticketRef, {
+      const timestamp = new Date().toISOString();
+
+      await supabase.from('contact_forms').update({
         status: 'RESOLVED',
         moderatorId: currentUser.id,
         moderatorReply: reply,
-        resolvedAt: serverTimestamp()
-      });
+        resolvedAt: timestamp
+      }).eq('id', selectedTicket.id);
 
       // Send notification to member ONLY IF needsResponse is true/YES and senderId exists
       const requiresResponse = selectedTicket.needsResponse === true || selectedTicket.needsResponse === 'YES';
       if (requiresResponse && selectedTicket.senderId) {
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
+          userId: selectedTicket.senderId,
           recipientId: selectedTicket.senderId,
           senderId: currentUser.id,
           senderName: currentUser.displayName || 'Ban Quản Trị',
@@ -74,7 +74,7 @@ export default function SupportManager() {
           targetId: selectedTicket.id,
           targetType: 'SUPPORT_TICKET',
           read: false,
-          createdAt: serverTimestamp(),
+          createdAt: timestamp,
           ticketSubject: selectedTicket.subject || selectedTicket.fullSubject || selectedTicket.category || 'Hỗ trợ & Liên hệ',
           ticketContent: selectedTicket.content || selectedTicket.message || '',
           moderatorReply: reply
@@ -82,16 +82,16 @@ export default function SupportManager() {
       }
 
       // Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
-        executorId: currentUser.id,
-        executorName: currentUser.displayName,
-        executorRole: currentUser.role,
+      await supabase.from('audit_logs').insert({
+        executorId: currentUser?.id,
+        executorName: currentUser?.displayName,
+        executorRole: currentUser?.role,
         action: 'RESOLVE_SUPPORT',
         targetId: selectedTicket.id,
         targetType: 'SUPPORT_TICKET',
-        details: `Giải quyết yêu cầu hỗ trợ từ ${selectedTicket.email}`,
+        details: `Giải quyết yêu cầu hỗ trợ từ ${selectedTicket.email || selectedTicket.name}`,
         reason: reply,
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
       toast.success("Đã giải quyết yêu cầu.");
@@ -99,6 +99,7 @@ export default function SupportManager() {
       setReply('');
       fetchTickets();
     } catch (err) {
+      console.error("Resolve support error:", err);
       toast.error("Thao tác thất bại.");
     }
   };
@@ -110,7 +111,8 @@ export default function SupportManager() {
   const executeDelete = async () => {
     if (!ticketToDelete) return;
     try {
-      await deleteDoc(doc(db, 'contact_forms', ticketToDelete));
+      await supabase.from('contact_forms').delete().eq('id', ticketToDelete);
+      
       toast.success("Đã xóa hoàn toàn yêu cầu hỗ trợ khỏi hệ thống.");
       if (selectedTicket?.id === ticketToDelete) setSelectedTicket(null);
       setTicketToDelete(null);
@@ -132,13 +134,13 @@ export default function SupportManager() {
           <div className="flex p-1 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-sm">
             <button
               onClick={() => setFilter('PENDING')}
-              className={`px-6 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${filter === 'PENDING' ? 'bg-neutral-900 text-white dark:bg-white dark:text-black shadow-lg' : 'text-neutral-50'}`}
+              className={`px-6 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${filter === 'PENDING' ? 'bg-neutral-900 text-white dark:bg-white dark:text-black shadow-lg' : 'text-neutral-500 hover:text-black dark:hover:text-white'}`}
             >
               Chờ Phản Hồi
             </button>
             <button
               onClick={() => setFilter('RESOLVED')}
-              className={`px-6 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${filter === 'RESOLVED' ? 'bg-neutral-900 text-white dark:bg-white dark:text-black shadow-lg' : 'text-neutral-50'}`}
+              className={`px-6 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${filter === 'RESOLVED' ? 'bg-neutral-900 text-white dark:bg-white dark:text-black shadow-lg' : 'text-neutral-500 hover:text-black dark:hover:text-white'}`}
             >
               Đã Giải Quyết
             </button>
@@ -179,10 +181,10 @@ export default function SupportManager() {
                       </div>
                     </div>
                     <span className="text-[10px] text-neutral-400 font-medium">
-                      {t.createdAt?.toDate ? t.createdAt.toDate().toLocaleString('vi-VN') : '---'}
+                      {new Date(t.createdAt).toLocaleString('vi-VN')}
                     </span>
                   </div>
-                  <p className="text-xs text-neutral-600 dark:text-neutral-400 line-clamp-2 italic mb-4 leading-relaxed">"{t.message}"</p>
+                  <p className="text-xs text-neutral-600 dark:text-neutral-400 line-clamp-2 italic mb-4 leading-relaxed">"{t.content || t.message}"</p>
                   <div className="flex items-center justify-between pt-4 border-t border-neutral-100 dark:border-neutral-800">
                     <div className="flex items-center gap-4">
                       <span className={`px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-tighter ${t.status === 'PENDING' ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
@@ -238,15 +240,19 @@ export default function SupportManager() {
                     <p className="text-sm font-bold truncate">{selectedTicket.name}</p>
                   </div>
                   <div className="p-4 bg-white/5 dark:bg-black/5 rounded-2xl">
-                    <p className="text-[9px] opacity-50 font-black uppercase tracking-widest mb-1">Email liên hệ</p>
-                    <p className="text-sm font-bold truncate font-mono">{selectedTicket.email ? selectedTicket.email.replace(/(.{2})(.*)(@.*)/, '$1••••••$3') : 'Không có'}</p>
+                    <p className="text-[9px] opacity-50 font-black uppercase tracking-widest mb-1">Thông tin liên hệ</p>
+                    <p className="text-sm font-bold truncate font-mono">
+                      {selectedTicket.contactInfo 
+                        ? selectedTicket.contactInfo.replace(/(.{2})(.*)(@.*)/, '$1••••••$3') 
+                        : (selectedTicket.email ? selectedTicket.email.replace(/(.{2})(.*)(@.*)/, '$1••••••$3') : 'Không có')}
+                    </p>
                   </div>
                 </div>
 
                 <div className="p-6 bg-white/5 dark:bg-black/5 rounded-[2rem] border border-white/10 dark:border-black/10 space-y-3">
                   <p className="text-[10px] opacity-50 font-black uppercase tracking-widest">Tiêu đề & Nội dung tin nhắn</p>
-                  <p className="text-base font-black text-amber-400 dark:text-amber-600 uppercase">{selectedTicket.subject}</p>
-                  <p className="text-sm leading-relaxed italic whitespace-pre-wrap">{selectedTicket.message}</p>
+                  <p className="text-base font-black text-amber-400 dark:text-amber-600 uppercase">{selectedTicket.fullSubject || selectedTicket.subject}</p>
+                  <p className="text-sm leading-relaxed italic whitespace-pre-wrap">{selectedTicket.content || selectedTicket.message}</p>
                 </div>
 
                 {filter === 'PENDING' ? (
