@@ -5,11 +5,8 @@ import {
   Trash2, UserMinus, Shield, MoreVertical, X, AlertCircle, History, 
   User, Ban, AlertTriangle, EyeOff, BadgeMinus, ShieldPlus, BadgeCheck
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, deleteDoc,
-  orderBy, where, addDoc, limit 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import toast from 'react-hot-toast';
 import { CreatorItem } from '../../types';
@@ -20,7 +17,7 @@ type ActionType = 'DELETE' | 'RESTORE' | 'SUSPEND' | 'UNSUSPEND' | 'RESTRICT' | 
 type FilterTab = 'ALL' | 'ACTIVE' | 'SUSPENDED' | 'DELETED';
 
 export default function UserManagement() {
-  const { user: currentUser, firebaseUser } = useAuthStore();
+  const { user: currentUser } = useAuthStore();
   const [users, setUsers] = useState<CreatorItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -51,9 +48,14 @@ export default function UserManagement() {
   const fetchUsers = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'users'), orderBy('createdAt', 'desc'), limit(100));
-      const snap = await getDocs(q);
-      setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() }) as CreatorItem));
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('createdAt', { ascending: false })
+        .limit(100);
+
+      if (error) throw error;
+      if (data) setUsers(data as CreatorItem[]);
     } catch (err) {
       console.error("Error fetching users:", err);
       toast.error("Không thể tải danh sách người dùng.");
@@ -64,14 +66,14 @@ export default function UserManagement() {
 
   const fetchUserHistory = async (userId: string) => {
     try {
-      const q = query(
-        collection(db, 'audit_logs'), 
-        where('targetId', '==', userId),
-        orderBy('createdAt', 'desc'),
-        limit(50)
-      );
-      const snap = await getDocs(q);
-      setUserHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const { data } = await supabase
+        .from('audit_logs')
+        .select('*')
+        .eq('targetId', userId)
+        .order('createdAt', { ascending: false })
+        .limit(50);
+        
+      if (data) setUserHistory(data);
     } catch (err) {
       console.error("Error fetching history:", err);
     }
@@ -80,7 +82,7 @@ export default function UserManagement() {
   const logAction = async (action: string, targetId: string, details: string) => {
     try {
       if (!currentUser) return;
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName,
         executorRole: currentUser.role,
@@ -113,17 +115,15 @@ export default function UserManagement() {
 
     setLoading(true);
     try {
-      const userRef = doc(db, 'users', selectedUser.id);
-      
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + parseInt(duration));
+      const nowIso = new Date().toISOString();
 
       switch (actionType) {
         case 'DELETE': {
           const deleteReasonText = reason.trim() || 'Tài khoản đã bị xóa/vô hiệu hóa bởi Quản trị viên do vi phạm quy tắc cộng đồng.';
-          const nowIso = new Date().toISOString();
           
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             isDeleted: true,
             status: 'DELETED',
             deletedAt: nowIso,
@@ -133,9 +133,9 @@ export default function UserManagement() {
             isLocked: true,
             lockReason: deleteReasonText,
             lockExpiresAt: null
-          });
+          }).eq('id', selectedUser.id);
 
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'ACCOUNT_DELETED',
@@ -150,9 +150,8 @@ export default function UserManagement() {
           break;
         }
         case 'RESTORE': {
-          const nowIso = new Date().toISOString();
           const restoreReasonText = reason.trim() || 'Tài khoản đã được khôi phục hoạt động bởi Quản trị viên.';
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             isDeleted: false,
             status: 'ACTIVE',
             deletedAt: null,
@@ -163,9 +162,9 @@ export default function UserManagement() {
             lockReason: null,
             lockExpiresAt: null,
             appealStatus: 'APPROVED'
-          });
+          }).eq('id', selectedUser.id);
 
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'ACCOUNT_RESTORED',
@@ -180,47 +179,52 @@ export default function UserManagement() {
           break;
         }
         case 'SUSPEND':
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             isLocked: true,
             lockReason: reason,
             lockExpiresAt: expiresAt.toISOString()
-          });
-          await addDoc(collection(db, 'notifications'), {
+          }).eq('id', selectedUser.id);
+          
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'ACCOUNT_SUSPENDED',
             title: 'Tài khoản bị đình chỉ',
             message: `Tài khoản của bạn đã bị đình chỉ hoạt động. Lý do: ${reason}. Thời hạn: đến ${expiresAt.toLocaleDateString('vi-VN')}.`,
             read: false,
-            createdAt: new Date().toISOString()
+            createdAt: nowIso
           });
+          
           await logAction('SUSPEND_USER', selectedUser.id, `Đình chỉ tài khoản đến ${expiresAt.toLocaleDateString('vi-VN')}`);
           toast.success("Đã đình chỉ tài khoản.");
           break;
         case 'UNSUSPEND':
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             isLocked: false,
             lockReason: null,
             lockExpiresAt: null
-          });
-          await addDoc(collection(db, 'notifications'), {
+          }).eq('id', selectedUser.id);
+          
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'ACCOUNT_UNLOCKED',
             title: 'Tài khoản đã được mở khóa',
             message: `Tài khoản của bạn đã được mở khóa bởi quản trị viên. ${reason ? `Ghi chú: ${reason}` : ''}`,
             read: false,
-            createdAt: new Date().toISOString()
+            createdAt: nowIso
           });
+          
           await logAction('UNSUSPEND_USER', selectedUser.id, `Mở khóa tài khoản`);
           toast.success("Đã mở khóa tài khoản.");
           break;
         case 'RESTRICT':
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             restrictedActivities,
             restrictionExpiresAt: expiresAt.toISOString(),
             restrictionReason: reason
-          });
+          }).eq('id', selectedUser.id);
+          
           const actLabelsMap: Record<string, string> = {
             'POST_CHARACTER': 'Đăng Character',
             'POST_PROMPT': 'Đăng Prompt',
@@ -228,33 +232,37 @@ export default function UserManagement() {
             'POST_COMMENT': 'Bình luận'
           };
           const labelList = restrictedActivities.map(a => actLabelsMap[a] || a).join(', ');
-          await addDoc(collection(db, 'notifications'), {
+          
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'ACTIVITY_RESTRICTED',
             title: 'Tài khoản bị giới hạn hoạt động',
             message: `Tài khoản của bạn đã bị giới hạn các hoạt động: ${labelList}. Lý do: ${reason}. Thời hạn: đến ${expiresAt.toLocaleDateString('vi-VN')}.`,
             read: false,
-            createdAt: new Date().toISOString()
+            createdAt: nowIso
           });
+          
           await logAction('RESTRICT_USER', selectedUser.id, `Giới hạn hoạt động (${labelList}) đến ${expiresAt.toLocaleDateString('vi-VN')}`);
           toast.success("Đã giới hạn hoạt động.");
           break;
         case 'LIFT_RESTRICTION':
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             restrictedActivities: [],
             restrictionExpiresAt: null,
             restrictionReason: null
-          });
-          await addDoc(collection(db, 'notifications'), {
+          }).eq('id', selectedUser.id);
+          
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'RESTRICTION_LIFTED',
             title: 'Đã gỡ giới hạn hoạt động',
             message: `Quản trị viên đã gỡ bỏ các giới hạn hoạt động đối với tài khoản của bạn.`,
             read: false,
-            createdAt: new Date().toISOString()
+            createdAt: nowIso
           });
+          
           await logAction('LIFT_RESTRICTION', selectedUser.id, `Gỡ giới hạn hoạt động`);
           toast.success("Đã gỡ giới hạn hoạt động.");
           break;
@@ -263,37 +271,40 @@ export default function UserManagement() {
             toast.error("Chỉ Admin mới có quyền gỡ quyền Creator của Moderator.");
             return;
           }
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             creatorStatus: false,
             role: (selectedUser.role === 'MODERATOR' || selectedUser.role === 'MOD') ? selectedUser.role : (selectedUser.role === 'ADMIN' ? 'ADMIN' : 'USER')
-          });
+          }).eq('id', selectedUser.id);
+          
           await logAction('REMOVE_CREATOR', selectedUser.id, `Hủy quyền Creator`);
           toast.success("Đã hủy quyền Creator.");
           break;
         case 'PROMOTE_ADMIN':
-          await updateDoc(userRef, { role: 'ADMIN' });
+          await supabase.from('users').update({ role: 'ADMIN' }).eq('id', selectedUser.id);
           await logAction('PROMOTE_ADMIN', selectedUser.id, `Thăng cấp lên Admin`);
           toast.success("Đã thăng cấp Admin.");
           break;
         case 'PROMOTE_MOD':
-          await updateDoc(userRef, {
+          await supabase.from('users').update({
             moderatorInviteStatus: 'PENDING',
-            updatedAt: new Date().toISOString()
-          });
-          await addDoc(collection(db, 'notifications'), {
+            updatedAt: nowIso
+          }).eq('id', selectedUser.id);
+          
+          await supabase.from('notifications').insert({
             userId: selectedUser.id,
             recipientId: selectedUser.id,
             type: 'MODERATOR_INVITE',
             title: 'Lời mời làm Moderator',
             message: `Quản trị viên ${currentUser?.displayName || 'Admin'} đã gửi lời mời bạn trở thành Moderator của hệ thống.`,
             read: false,
-            createdAt: new Date().toISOString()
+            createdAt: nowIso
           });
+          
           await logAction('INVITE_MODERATOR', selectedUser.id, `Gửi lời mời làm Moderator`);
           toast.success("Đã gửi lời mời làm Moderator!");
           break;
         case 'DEMOTE':
-          await updateDoc(userRef, { role: selectedUser.creatorStatus ? 'CREATOR' : 'USER' });
+          await supabase.from('users').update({ role: selectedUser.creatorStatus ? 'CREATOR' : 'USER' }).eq('id', selectedUser.id);
           await logAction('DEMOTE_STAFF', selectedUser.id, `Hủy quyền quản trị/kiểm duyệt`);
           toast.success("Đã hủy quyền.");
           break;
@@ -511,7 +522,7 @@ export default function UserManagement() {
                             e.stopPropagation();
                             setActiveMenuId(activeMenuId === u.id ? null : u.id);
                           }}
-                          className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors"
+                          className="p-2 hover:bg-neutral-100 dark:bg-neutral-800 rounded-full transition-colors"
                         >
                           <MoreVertical className="w-5 h-5 text-neutral-500" />
                         </button>
@@ -676,7 +687,7 @@ export default function UserManagement() {
                       {selectedUser.displayName} ({selectedUser.email ? selectedUser.email.replace(/(.{2})(.*)(@.*)/, '$1••••••$3') : `ID: ${selectedUser.numericId || selectedUser.id}`})
                     </p>
                   </div>
-                  <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors">
+                  <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-neutral-100 dark:bg-neutral-800 rounded-full transition-colors">
                     <X className="w-5 h-5" />
                   </button>
                 </div>
