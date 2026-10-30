@@ -4,8 +4,10 @@ import {
   Flame, Sparkles, Users, Tag as TagIcon, MessageSquare, 
   Search as SearchIcon, ArrowRight, Compass
 } from "lucide-react";
-import { db } from "../lib/firebase";
-import { collection, query, getDocs, where, limit } from "firebase/firestore";
+
+// Xóa Firebase, import Supabase
+import { supabase } from "../lib/supabase"; 
+
 import PublicFeedbackCard from "../components/feedback/PublicFeedbackCard";
 import CharacterCard from "../components/CharacterCard";
 import PromptCard from "../components/PromptCard";
@@ -16,7 +18,6 @@ import { CharacterItem, PromptItem, CreatorItem } from "../types";
 import { useAuthStore } from "../store/useAuthStore";
 import { useSeo } from "../hooks/useSeo";
 import toast from "react-hot-toast";
-
 import { parseIdQuery, lookupIdInFirebase, matchesSearchText, matchesItemFields } from "../lib/searchUtils";
 
 export default function Home() {
@@ -57,64 +58,78 @@ export default function Home() {
     let loadedPrompts: PromptItem[] = [];
 
     try {
-      // 1. Fetch Characters (limit to 6 for Home)
+      // 1. Fetch Characters (Sử dụng Supabase)
       try {
-        const charQuery = query(collection(db, "characters"), limit(6));
-        const charSnap = await getDocs(charQuery);
-        loadedChars = charSnap.docs
-          .map(doc => ({ id: doc.id, ...doc.data() } as CharacterItem))
-          .filter((c: any) => !c.deletedAt && !c.isHidden);
+        const { data: charsData, error: charError } = await supabase
+          .from('characters')
+          .select('*')
+          .is('deletedAt', null)
+          .is('isHidden', false)
+          .limit(20); // Lấy nhiều hơn 1 chút để sắp xếp điểm
 
-        const sortedChars = [...loadedChars].sort((a, b) => {
-          const scoreA = (a.likesCount || 0) * 3 + (a.savesCount || 0) * 2 + (a.viewsCount || 0);
-          const scoreB = (b.likesCount || 0) * 3 + (b.savesCount || 0) * 2 + (b.viewsCount || 0);
-          return scoreB - scoreA;
-        });
-        setHotCharacters(sortedChars);
+        if (charsData && !charError) {
+          loadedChars = charsData as CharacterItem[];
+          const sortedChars = [...loadedChars].sort((a, b) => {
+            const scoreA = (a.likesCount || 0) * 3 + (a.savesCount || 0) * 2 + (a.viewsCount || 0);
+            const scoreB = (b.likesCount || 0) * 3 + (b.savesCount || 0) * 2 + (b.viewsCount || 0);
+            return scoreB - scoreA;
+          });
+          setHotCharacters(sortedChars.slice(0, 6)); // Chỉ giữ 6 cái hot nhất
+        }
       } catch (e) {
         console.error("Error fetching characters:", e);
       }
 
-      // 2. Fetch Prompts (limit to 6 for Home)
+      // 2. Fetch Prompts (Sử dụng Supabase)
       try {
-        const promptQuery = query(collection(db, "prompts"), limit(6));
-        const promptSnap = await getDocs(promptQuery);
-        loadedPrompts = promptSnap.docs
-          .map(doc => ({ id: doc.id, ...doc.data() } as PromptItem))
-          .filter((p: any) => !p.deletedAt && !p.isHidden);
+        const { data: promptData, error: promptError } = await supabase
+          .from('prompts')
+          .select('*')
+          .is('deletedAt', null)
+          .is('isHidden', false)
+          .limit(20);
 
-        const sortedPrompts = [...loadedPrompts].sort((a, b) => {
-          const scoreA = (a.copyCount || 0) * 3 + (a.savesCount || 0) * 2 + (a.viewsCount || 0);
-          const scoreB = (b.copyCount || 0) * 3 + (b.savesCount || 0) * 2 + (b.viewsCount || 0);
-          return scoreB - scoreA;
-        });
-        setHotPrompts(sortedPrompts);
+        if (promptData && !promptError) {
+          loadedPrompts = promptData as PromptItem[];
+          const sortedPrompts = [...loadedPrompts].sort((a, b) => {
+            const scoreA = (a.copyCount || 0) * 3 + (a.savesCount || 0) * 2 + (a.viewsCount || 0);
+            const scoreB = (b.copyCount || 0) * 3 + (b.savesCount || 0) * 2 + (b.viewsCount || 0);
+            return scoreB - scoreA;
+          });
+          setHotPrompts(sortedPrompts.slice(0, 6));
+        }
       } catch (e) {
         console.error("Error fetching prompts:", e);
       }
 
-      // 3. Fetch Top Creators (limit to 6 creators for Home)
+      // 3. Fetch Top Creators (Sử dụng Supabase)
       try {
-        const creatorQuery = query(collection(db, "users"), where("creatorStatus", "==", true), limit(6));
-        const userSnap = await getDocs(creatorQuery);
-        const rawCreators: CreatorItem[] = userSnap.docs
-          .map(doc => ({ id: doc.id, ...doc.data() } as CreatorItem))
-          .filter((u: any) => !u.deletedAt && !u.isHidden && !u.isLocked);
+        const { data: creatorData, error: creatorError } = await supabase
+          .from('users')
+          .select('*')
+          .eq('creatorStatus', true)
+          .is('deletedAt', null)
+          .is('isHidden', false)
+          .is('isLocked', false)
+          .limit(20);
 
-        const sortedCreators = [...rawCreators].sort((a, b) => {
-          const scoreA = (a.followerCount || 0) * 5 + (a.characterCount || 0);
-          const scoreB = (b.followerCount || 0) * 5 + (b.characterCount || 0);
-          return scoreB - scoreA;
-        });
-        setTopCreators(sortedCreators);
+        if (creatorData && !creatorError) {
+          const rawCreators = creatorData as CreatorItem[];
+          const sortedCreators = [...rawCreators].sort((a, b) => {
+            const scoreA = (a.followerCount || 0) * 5 + (a.characterCount || 0);
+            const scoreB = (b.followerCount || 0) * 5 + (b.characterCount || 0);
+            return scoreB - scoreA;
+          });
+          setTopCreators(sortedCreators.slice(0, 6));
+        }
       } catch (e) {
         console.error("Error fetching creators:", e);
       }
 
       // 4. Calculate Trending Tags
       const tagMap: Record<string, number> = {};
-      loadedChars.forEach(c => c.tags?.forEach(t => { tagMap[t] = (tagMap[t] || 0) + 1; }));
-      loadedPrompts.forEach(p => p.tags?.forEach(t => { tagMap[t] = (tagMap[t] || 0) + 1; }));
+      loadedChars.forEach(c => c.tags?.forEach((t: string) => { tagMap[t] = (tagMap[t] || 0) + 1; }));
+      loadedPrompts.forEach(p => p.tags?.forEach((t: string) => { tagMap[t] = (tagMap[t] || 0) + 1; }));
 
       const sortedTags = Object.entries(tagMap)
         .map(([tag, count]) => ({ tag, count }))
@@ -127,18 +142,19 @@ export default function Home() {
 
       setTrendingTags(finalTags);
 
-      // 5. Fetch Public Feedback
+      // 5. Fetch Public Feedback (Sử dụng Supabase)
       try {
-        const fbQuery = query(
-          collection(db, "feedbacks"),
-          where("mode", "==", "PUBLIC"),
-          limit(4)
-        );
-        const fbSnap = await getDocs(fbQuery);
-        const fbList = fbSnap.docs
-          .map(doc => ({ id: doc.id, ...doc.data() }))
-          .filter((f: any) => !f.deletedAt && !f.isHidden);
-        setPublicFeedbacks(fbList);
+        const { data: fbData, error: fbError } = await supabase
+          .from('feedbacks')
+          .select('*')
+          .eq('mode', 'PUBLIC')
+          .is('deletedAt', null)
+          .is('isHidden', false)
+          .limit(4);
+          
+        if (fbData && !fbError) {
+          setPublicFeedbacks(fbData);
+        }
       } catch (e) {
         console.error("Error fetching public feedbacks:", e);
       }
@@ -200,11 +216,10 @@ export default function Home() {
     setSearchParams(params);
   };
 
-  // Filter items based on searchQuery & selectedTag
   const filteredCharacters = hotCharacters.filter(item => {
     const term = searchQuery.trim();
     const matchesSearch = !term || matchesItemFields(
-      [item.name, item.slogan, item.plot, item.creatorName, item.tags, item.numericId, item.id],
+      [item.name, item.slogan, item.plot, item.creatorName, item.tags?.join(' '), item.numericId, item.id],
       term
     );
     const tagMatch = selectedTag ? item.tags?.some(t => matchesSearchText(t, selectedTag)) : true;
@@ -214,7 +229,7 @@ export default function Home() {
   const filteredPrompts = hotPrompts.filter(item => {
     const term = searchQuery.trim();
     const matchesSearch = !term || matchesItemFields(
-      [item.name, item.title, item.purpose, item.content, item.authorName, item.tags, item.numericId, item.id],
+      [item.name, item.title, item.purpose, item.content, item.authorName, item.tags?.join(' '), item.numericId, item.id],
       term
     );
     const tagMatch = selectedTag ? item.tags?.some(t => matchesSearchText(t, selectedTag)) : true;
@@ -249,7 +264,6 @@ export default function Home() {
             Nền tảng cộng đồng dành cho Google AI Studio — Nơi tự do khám phá, sáng tạo Character, Prompt và kết nối với các Creator hàng đầu.
           </p>
 
-          {/* Quick Search */}
           <form onSubmit={handleSearchSubmit} className="max-w-2xl mx-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
             <div className="relative flex-1">
               <SearchIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 xs:w-5 xs:h-5 text-neutral-400" />
