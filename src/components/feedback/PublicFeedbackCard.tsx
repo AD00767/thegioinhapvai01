@@ -4,16 +4,14 @@ import {
   Globe, MessageSquare, Heart, ThumbsUp, Smile, Frown, Angry, Sparkles, 
   Trash2, Edit3, CornerDownRight, Send, ShieldAlert, ArrowRight, Check, X, MoreVertical, Flag
 } from 'lucide-react';
-import { 
-  doc, updateDoc, deleteDoc, collection, addDoc, getDocs, query, where, orderBy, serverTimestamp 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
-import { useAuthStore } from '../../store/useAuthStore';
-import CommentSection from '../comments/CommentSection';
-import ReportModal from '../ReportModal';
-import DeleteConfirmModal from '../DeleteConfirmModal';
-import UserBadge from '../UserBadge';
-import { getValidAvatar, DEFAULT_AVATAR } from '../../lib/avatar';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../lib/supabase';
+import { useAuthStore } from '../store/useAuthStore';
+import CommentSection from './comments/CommentSection';
+import ReportModal from './ReportModal';
+import DeleteConfirmModal from './DeleteConfirmModal';
+import UserBadge from './UserBadge';
+import { getValidAvatar, DEFAULT_AVATAR } from '../lib/avatar';
 import toast from 'react-hot-toast';
 
 export interface FeedbackItem {
@@ -28,23 +26,11 @@ export interface FeedbackItem {
   title?: string;
   content: string;
   images?: string[];
-  reactions?: Record<string, string>; // userId -> reactionType ('like'|'love'|'haha'|'wow'|'sad'|'angry')
+  reactions?: Record<string, string>; // userId -> reactionType
   reactionsCount?: number;
   commentsCount?: number;
   createdAt?: any;
   updatedAt?: any;
-  deletedAt?: string | null;
-}
-
-interface CommentItem {
-  id: string;
-  targetId: string;
-  authorId: string;
-  authorName: string;
-  authorAvatar: string;
-  parentId?: string | null;
-  content: string;
-  createdAt?: any;
   deletedAt?: string | null;
 }
 
@@ -70,12 +56,11 @@ export default function PublicFeedbackCard({
   onDelete
 }: PublicFeedbackCardProps) {
   const navigate = useNavigate();
-  const { user, firebaseUser } = useAuthStore();
+  const { user } = useAuthStore();
 
-  const currentUserId = user?.id || user?.uid || firebaseUser?.uid;
+  const currentUserId = user?.id;
   const isSender = Boolean(currentUserId && currentUserId === feedback.senderId);
   const isRecipient = Boolean(currentUserId && currentUserId === feedback.recipientId);
-  const isAdmin = user?.role === 'ADMIN';
   const isStaff = user?.role === 'ADMIN' || user?.role === 'MODERATOR' || user?.role === 'MOD';
 
   const [isDeleted, setIsDeleted] = useState(false);
@@ -97,6 +82,7 @@ export default function PublicFeedbackCard({
 
   // Report State
   const [isReportOpen, setIsReportOpen] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   if (isDeleted) {
     return null;
@@ -123,23 +109,23 @@ export default function PublicFeedbackCard({
 
       const totalCount = Object.keys(updatedReactions).length;
 
-      const fbRef = doc(db, 'feedbacks', feedback.id);
-      await updateDoc(fbRef, {
+      await supabase.from('feedbacks').update({
         reactions: updatedReactions,
         reactionsCount: totalCount
-      });
+      }).eq('id', feedback.id);
 
       // Send notification to sender if it's someone else reacting
       if (feedback.senderId !== user.id) {
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           userId: feedback.senderId,
+          recipientId: feedback.senderId,
           senderId: user.id,
           type: 'FEEDBACK',
           title: 'Cảm xúc mới trên Feedback',
           message: `${user.displayName} đã thả cảm xúc ${REACTION_ICONS[reactionType]?.emoji || ''} vào Feedback của bạn.`,
           link: '/feedbacks',
           read: false,
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
       }
 
@@ -159,12 +145,11 @@ export default function PublicFeedbackCard({
 
     setSavingEdit(true);
     try {
-      const fbRef = doc(db, 'feedbacks', feedback.id);
-      await updateDoc(fbRef, {
+      await supabase.from('feedbacks').update({
         title: editTitle.trim(),
         content: editContent.trim(),
-        updatedAt: serverTimestamp()
-      });
+        updatedAt: new Date().toISOString()
+      }).eq('id', feedback.id);
 
       toast.success("Đã cập nhật bài đăng Feedback.");
       setIsEditing(false);
@@ -175,9 +160,6 @@ export default function PublicFeedbackCard({
       setSavingEdit(false);
     }
   };
-
-  // Delete post (sender or admin)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const handleDeletePost = async (reason?: string, details?: string) => {
     try {
@@ -193,8 +175,7 @@ export default function PublicFeedbackCard({
         const removalReasonText = reason.trim();
         const removalDetailsText = details?.trim() || removalReasonText;
 
-        const fbRef = doc(db, 'feedbacks', feedback.id);
-        await updateDoc(fbRef, { 
+        await supabase.from('feedbacks').update({ 
           isHidden: true,
           deletedAt: now,
           deletedBy: user?.id || 'admin',
@@ -202,12 +183,12 @@ export default function PublicFeedbackCard({
           removalDetails: removalDetailsText,
           removalTime: now,
           appealStatus: 'NONE'
-        });
+        }).eq('id', feedback.id);
 
         // Send notification to author
         if (feedback.senderId && feedback.senderId !== user?.id) {
           const targetName = feedback.title || feedback.content?.slice(0, 40) || 'Feedback';
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: feedback.senderId,
             recipientId: feedback.senderId,
             senderId: user?.id,
@@ -228,7 +209,7 @@ export default function PublicFeedbackCard({
         }
 
         // Add audit log
-        await addDoc(collection(db, 'audit_logs'), {
+        await supabase.from('audit_logs').insert({
           executorId: user?.id,
           executorName: user?.displayName || 'Admin',
           executorRole: user?.role || 'ADMIN',
@@ -243,11 +224,10 @@ export default function PublicFeedbackCard({
         toast.success("Đã gỡ bỏ Feedback và gửi thông báo cho tác giả.");
       } else {
         // Author deletes own feedback
-        const fbRef = doc(db, 'feedbacks', feedback.id);
-        await updateDoc(fbRef, { 
+        await supabase.from('feedbacks').update({ 
           deletedAt: now,
           deletedBy: user?.id
-        });
+        }).eq('id', feedback.id);
         toast.success("Đã xóa Feedback thành công.");
       }
 
@@ -266,7 +246,6 @@ export default function PublicFeedbackCard({
       {/* Header: Sender -> Recipient */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Sender */}
           <div 
             onClick={() => navigate(`/creator/${feedback.senderId}`)}
             className="flex items-center gap-2 cursor-pointer group"
@@ -293,7 +272,6 @@ export default function PublicFeedbackCard({
 
           <ArrowRight className="w-4 h-4 text-neutral-400 shrink-0" />
 
-          {/* Recipient */}
           <div 
             onClick={() => navigate(`/creator/${feedback.recipientId}`)}
             className="flex items-center gap-2 cursor-pointer group"
@@ -416,7 +394,9 @@ export default function PublicFeedbackCard({
 
       {/* Timestamp */}
       <div className="text-[10px] text-neutral-400 font-medium">
-        {feedback.createdAt?.toDate ? feedback.createdAt.toDate().toLocaleString('vi-VN') : 'Mới đăng'}
+        {feedback.createdAt?.toDate 
+          ? feedback.createdAt.toDate().toLocaleString('vi-VN') 
+          : (feedback.createdAt ? new Date(feedback.createdAt).toLocaleString('vi-VN') : 'Mới đăng')}
       </div>
 
       {/* Reactions Display Bar & Counts */}
@@ -424,7 +404,7 @@ export default function PublicFeedbackCard({
         <div className="flex items-center gap-1.5">
           {reactionsList.length > 0 && (
             <div className="flex items-center -space-x-1">
-              {Array.from(new Set(reactionsList)).map(rType => (
+              {Array.from(new Set(reactionsList)).map((rType: any) => (
                 <span key={rType} className="text-sm bg-neutral-100 dark:bg-neutral-800 rounded-full p-0.5 shadow-sm">
                   {REACTION_ICONS[rType]?.emoji || '👍'}
                 </span>
@@ -447,7 +427,6 @@ export default function PublicFeedbackCard({
 
       {/* Actions Bar: Reaction Button & Comment Toggle Button */}
       <div className="pt-1 flex items-center gap-2 border-t border-neutral-100 dark:border-neutral-800 relative">
-        {/* Reaction Trigger Button with Hover Picker */}
         <div className="relative">
           <button
             onClick={() => setShowReactionPicker(!showReactionPicker)}
@@ -461,7 +440,6 @@ export default function PublicFeedbackCard({
             <span>{myReaction ? REACTION_ICONS[myReaction]?.label : 'Thả cảm xúc'}</span>
           </button>
 
-          {/* Emoji Selector Popup */}
           {showReactionPicker && (
             <div className="absolute left-0 bottom-full mb-2 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-2 shadow-xl flex items-center gap-2 z-20 animate-scale-up">
               {Object.entries(REACTION_ICONS).map(([key, item]) => (
@@ -478,7 +456,6 @@ export default function PublicFeedbackCard({
           )}
         </div>
 
-        {/* Toggle Comments Button */}
         <button
           onClick={() => setShowComments(!showComments)}
           className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-xs font-bold text-neutral-600 dark:text-neutral-300 transition-colors"
@@ -488,7 +465,6 @@ export default function PublicFeedbackCard({
         </button>
       </div>
 
-      {/* Comments Section */}
       {showComments && (
         <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 animate-fade-in">
           <CommentSection
