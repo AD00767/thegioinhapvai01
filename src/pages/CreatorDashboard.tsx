@@ -4,8 +4,8 @@ import {
   Users, Pin, Edit3, Trash2, Plus, Search, Sparkles, Send, CheckCircle2, Lock, 
   Globe, AlertCircle, RefreshCw, ChevronRight, CornerDownRight, X
 } from 'lucide-react';
-import { collection, query, where, getDocs, doc, updateDoc, deleteDoc, addDoc, getDoc, serverTimestamp } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Thay Firebase bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { CharacterItem, PromptItem } from '../types';
 import CreateCharacterModal from '../components/profile/CreateCharacterModal';
@@ -76,92 +76,92 @@ export default function CreatorDashboard() {
 
   const [loading, setLoading] = useState(true);
 
-  // Fetch all dashboard data
+  // Fetch all dashboard data using Supabase
   const loadDashboardData = async () => {
     if (!user?.id) return;
     setLoading(true);
 
     try {
-      // 1. Fetch Creator's Characters
-      const charQ = query(collection(db, 'characters'), where('creatorId', '==', user.id));
-      const charSnap = await getDocs(charQ);
-      const charList: CharacterItem[] = [];
       let viewsSum = 0;
       let likesSum = 0;
       let savesSum = 0;
 
-      charSnap.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt) {
-          const item = { id: d.id, ...data } as CharacterItem;
-          charList.push(item);
-          viewsSum += data.viewsCount || 0;
-          likesSum += data.likesCount || 0;
-          savesSum += data.savesCount || 0;
-        }
-      });
-      setCharacters(charList);
+      // 1. Fetch Creator's Characters
+      const { data: charData } = await supabase
+        .from('characters')
+        .select('*')
+        .eq('creatorId', user.id)
+        .is('deletedAt', null);
+
+      if (charData) {
+        setCharacters(charData as CharacterItem[]);
+        charData.forEach(c => {
+          viewsSum += c.viewsCount || 0;
+          likesSum += c.likesCount || 0;
+          savesSum += c.savesCount || 0;
+        });
+      }
 
       // 2. Fetch Creator's Prompts
-      const promptQ = query(collection(db, 'prompts'), where('authorId', '==', user.id));
-      const promptSnap = await getDocs(promptQ);
-      const promptList: PromptItem[] = [];
+      const { data: promptData } = await supabase
+        .from('prompts')
+        .select('*')
+        .eq('authorId', user.id)
+        .is('deletedAt', null);
 
-      promptSnap.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt) {
-          const item = { id: d.id, ...data } as PromptItem;
-          promptList.push(item);
-          viewsSum += data.viewsCount || 0;
-          savesSum += data.savesCount || 0;
-        }
-      });
-      setPrompts(promptList);
+      if (promptData) {
+        setPrompts(promptData as PromptItem[]);
+        promptData.forEach(p => {
+          viewsSum += p.viewsCount || 0;
+          savesSum += p.savesCount || 0;
+        });
+      }
 
       setTotalViews(viewsSum);
       setTotalLikes(likesSum);
       setTotalSaves(savesSum);
 
       // 3. Fetch Feedbacks received
-      const fbQ = query(collection(db, 'feedbacks'), where('recipientId', '==', user.id));
-      const fbSnap = await getDocs(fbQ);
-      const fbList: FeedbackItem[] = [];
-      fbSnap.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt) {
-          fbList.push({ id: d.id, ...data } as FeedbackItem);
-        }
-      });
-      fbList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setFeedbacks(fbList);
+      const { data: fbData } = await supabase
+        .from('feedbacks')
+        .select('*')
+        .eq('recipientId', user.id)
+        .is('deletedAt', null)
+        .order('createdAt', { ascending: false });
+
+      if (fbData) {
+        setFeedbacks(fbData as FeedbackItem[]);
+      }
 
       // 4. Fetch Followers
-      const followQ = query(collection(db, 'follows'), where('targetCreatorId', '==', user.id));
-      const followSnap = await getDocs(followQ);
-      const followerList: FollowerItem[] = [];
+      const { data: followData } = await supabase
+        .from('follows')
+        .select('*')
+        .eq('targetCreatorId', user.id)
+        .order('createdAt', { ascending: false });
 
-      for (const fDoc of followSnap.docs) {
-        const fData = fDoc.data();
-        const followerUserDoc = await getDoc(doc(db, 'users', fData.followerId));
-        let name = fData.followerName || 'Người dùng';
-        let avatar = fData.followerAvatar || '';
+      if (followData && followData.length > 0) {
+        const followerIds = followData.map(f => f.followerId);
+        const { data: usersData } = await supabase
+          .from('users')
+          .select('id, displayName, avatar')
+          .in('id', followerIds);
 
-        if (followerUserDoc.exists()) {
-          const uData = followerUserDoc.data();
-          name = uData.displayName || name;
-          avatar = uData.avatar || avatar;
-        }
-
-        followerList.push({
-          id: fDoc.id,
-          followerId: fData.followerId,
-          followerName: name,
-          followerAvatar: avatar,
-          createdAt: fData.createdAt || new Date().toISOString()
+        const followerList = followData.map(f => {
+          const uData = usersData?.find(u => u.id === f.followerId);
+          return {
+            id: f.id,
+            followerId: f.followerId,
+            followerName: uData?.displayName || f.followerName || 'Người dùng',
+            followerAvatar: uData?.avatar || f.followerAvatar || '',
+            createdAt: f.createdAt || new Date().toISOString()
+          };
         });
+
+        setFollowers(followerList);
+      } else {
+        setFollowers([]);
       }
-      followerList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setFollowers(followerList);
 
     } catch (err) {
       console.error("Lỗi tải dữ liệu Creator Dashboard:", err);
@@ -209,10 +209,11 @@ export default function CreatorDashboard() {
     }
 
     try {
-      await updateDoc(doc(db, 'characters', char.id), {
+      await supabase.from('characters').update({
         isPinned: !currentlyPinned,
-        updatedAt: serverTimestamp()
-      });
+        updatedAt: new Date().toISOString()
+      }).eq('id', char.id);
+      
       toast.success(currentlyPinned ? "Đã bỏ ghim Character." : "Đã ghim Character thành công (tối đa 3)!");
       loadDashboardData();
     } catch (err) {
@@ -226,7 +227,7 @@ export default function CreatorDashboard() {
 
   const executeDeleteCharacter = async (charId: string) => {
     try {
-      await deleteDoc(doc(db, 'characters', charId));
+      await supabase.from('characters').delete().eq('id', charId);
       toast.success("Đã xóa hoàn toàn Character khỏi hệ thống!");
       loadDashboardData();
     } catch (err) {
@@ -246,11 +247,12 @@ export default function CreatorDashboard() {
     }
 
     try {
-      await updateDoc(doc(db, 'prompts', promptItem.id), {
+      await supabase.from('prompts').update({
         isPinned: !currentlyPinned,
         pinned: !currentlyPinned,
-        updatedAt: serverTimestamp()
-      });
+        updatedAt: new Date().toISOString()
+      }).eq('id', promptItem.id);
+      
       toast.success(currentlyPinned ? "Đã bỏ ghim Prompt." : "Đã ghim Prompt thành công (tối đa 3)!");
       loadDashboardData();
     } catch (err) {
@@ -264,7 +266,7 @@ export default function CreatorDashboard() {
 
   const executeDeletePrompt = async (promptId: string) => {
     try {
-      await deleteDoc(doc(db, 'prompts', promptId));
+      await supabase.from('prompts').delete().eq('id', promptId);
       toast.success("Đã xóa hoàn toàn Prompt khỏi hệ thống!");
       loadDashboardData();
     } catch (err) {
@@ -280,10 +282,10 @@ export default function CreatorDashboard() {
     }
     setSubmittingReply(true);
     try {
-      await updateDoc(doc(db, 'feedbacks', feedbackId), {
+      await supabase.from('feedbacks').update({
         replyContent: replyText.trim(),
         replyCreatedAt: new Date().toISOString()
-      });
+      }).eq('id', feedbackId);
 
       toast.success("Đã gửi trả lời Feedback!");
       setReplyingFeedbackId(null);
@@ -301,10 +303,11 @@ export default function CreatorDashboard() {
   const handleDeleteFeedback = async () => {
     if (!deleteFeedbackItem) return;
     try {
-      await updateDoc(doc(db, 'feedbacks', deleteFeedbackItem), {
+      await supabase.from('feedbacks').update({
         deletedAt: new Date().toISOString(),
         deletedBy: user?.id
-      });
+      }).eq('id', deleteFeedbackItem);
+      
       toast.success("Đã xóa Feedback thành công!");
       loadDashboardData();
     } catch (err) {
@@ -376,7 +379,7 @@ export default function CreatorDashboard() {
         </div>
       </div>
 
-      {/* Overview Stat Cards Grid (Thống kê - 6 thẻ) */}
+      {/* Overview Stat Cards Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         {/* Total Views */}
         <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl p-4 shadow-sm flex flex-col justify-between">
@@ -541,7 +544,6 @@ export default function CreatorDashboard() {
                   className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl p-5 relative group flex flex-col justify-between shadow-sm hover:shadow-md transition-shadow"
                 >
                   <div>
-                    {/* Header line: Avatar, name, Pinned Badge */}
                     <div className="flex items-start gap-3 mb-3">
                       <img 
                         src={getValidAvatar(char.avatar)}
@@ -565,7 +567,6 @@ export default function CreatorDashboard() {
                       "{char.slogan}"
                     </p>
 
-                    {/* Tags */}
                     {char.tags && char.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1 mb-4">
                         {char.tags.map(t => (
@@ -577,7 +578,6 @@ export default function CreatorDashboard() {
                     )}
                   </div>
 
-                  {/* Metrics & Actions */}
                   <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
                     <div className="flex items-center gap-3 text-xs text-neutral-400">
                       <span className="flex items-center gap-1"><Eye className="w-3.5 h-3.5" /> {char.viewsCount || 0}</span>
