@@ -3,10 +3,8 @@ import {
   FileCheck, Clock, CheckCircle2, XCircle, Search, Filter, ExternalLink, 
   User, ShieldAlert, MessageSquare, Sparkles, RefreshCw, ChevronRight, AlertCircle 
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, addDoc, orderBy, where 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import toast from 'react-hot-toast';
 import { AppealItem } from '../../types';
@@ -33,10 +31,14 @@ export default function AppealManagement() {
   const fetchAppeals = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'appeals'), orderBy('createdAt', 'desc'));
-      const snap = await getDocs(q);
-      const list: AppealItem[] = snap.docs.map(d => ({ id: d.id, ...d.data() } as AppealItem));
-      setAppeals(list);
+      const { data, error } = await supabase
+        .from('appeals')
+        .select('*')
+        .order('createdAt', { ascending: false });
+        
+      if (error) throw error;
+      
+      setAppeals((data as AppealItem[]) || []);
     } catch (err) {
       console.error("Error fetching appeals:", err);
       toast.error("Không thể tải danh sách kháng nghị.");
@@ -55,26 +57,26 @@ export default function AppealManagement() {
       const now = new Date().toISOString();
 
       // 1. Update Appeal record
-      await updateDoc(doc(db, 'appeals', selectedAppeal.id), {
+      await supabase.from('appeals').update({
         status: newStatus,
         adminResponse: adminNote.trim() || (isApproved ? 'Đã duyệt khôi phục.' : 'Từ chối kháng nghị.'),
         processedBy: currentUser.id,
         processedByName: currentUser.displayName || 'Admin',
         processedAt: now,
         updatedAt: now
-      });
+      }).eq('id', selectedAppeal.id);
 
       // 2. Perform Content / Account Restoration or Status Update
       const { targetType, targetId } = selectedAppeal;
 
       if (isApproved) {
         if (targetType === 'ACCOUNT') {
-          await updateDoc(doc(db, 'users', targetId), {
+          await supabase.from('users').update({
             isLocked: false,
             lockReason: null,
             lockExpiresAt: null,
             appealStatus: 'APPROVED'
-          });
+          }).eq('id', targetId);
         } else {
           const collectionMap: Record<string, string> = {
             'CHARACTER': 'characters',
@@ -84,19 +86,17 @@ export default function AppealManagement() {
           };
           const collName = collectionMap[targetType];
           if (collName) {
-            await updateDoc(doc(db, collName, targetId), {
+            await supabase.from(collName).update({
               isHidden: false,
               deletedAt: null,
               appealStatus: 'APPROVED'
-            });
+            }).eq('id', targetId);
           }
         }
       } else {
         // If rejected, set target appealStatus to REJECTED
         if (targetType === 'ACCOUNT') {
-          await updateDoc(doc(db, 'users', targetId), {
-            appealStatus: 'REJECTED'
-          }).catch(() => {});
+          await supabase.from('users').update({ appealStatus: 'REJECTED' }).eq('id', targetId).catch(() => {});
         } else {
           const collectionMap: Record<string, string> = {
             'CHARACTER': 'characters',
@@ -106,15 +106,13 @@ export default function AppealManagement() {
           };
           const collName = collectionMap[targetType];
           if (collName) {
-            await updateDoc(doc(db, collName, targetId), {
-              appealStatus: 'REJECTED'
-            }).catch(() => {});
+            await supabase.from(collName).update({ appealStatus: 'REJECTED' }).eq('id', targetId).catch(() => {});
           }
         }
       }
 
       // 3. Send Notification to User
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
         userId: selectedAppeal.userId,
         recipientId: selectedAppeal.userId,
         type: isApproved ? 'APPEAL_APPROVED' : 'APPEAL_REJECTED',
@@ -130,7 +128,7 @@ export default function AppealManagement() {
       });
 
       // 4. Log Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName,
         action: isApproved ? 'APPEAL_APPROVE' : 'APPEAL_REJECT',
