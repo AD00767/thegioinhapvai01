@@ -5,8 +5,8 @@ import {
   Sparkles, Mail, Calendar, UserCheck, Smartphone, Key, Eye, EyeOff, Shield
 } from 'lucide-react';
 import { useAuthStore } from '../store/useAuthStore';
-import { logout, db } from '../lib/firebase';
-import { doc, updateDoc } from 'firebase/firestore';
+// Sử dụng Supabase thay cho Firebase
+import { supabase } from '../lib/supabase';
 import { applyTheme, applyFontSize, ThemeMode, FontSize } from '../lib/themeFont';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
@@ -82,9 +82,10 @@ export default function Settings() {
 
     if (user?.id) {
       try {
-        await updateDoc(doc(db, 'users', user.id), {
-          themePreference: mode
-        });
+        await supabase
+          .from('users')
+          .update({ themePreference: mode })
+          .eq('id', user.id);
       } catch (err) {
         console.error("Failed to save theme preference to user profile:", err);
       }
@@ -109,11 +110,12 @@ export default function Settings() {
 
     if (user?.id) {
       try {
-        await updateDoc(doc(db, 'users', user.id), {
-          notificationPreferences: updated
-        });
+        await supabase
+          .from('users')
+          .update({ notificationPreferences: updated })
+          .eq('id', user.id);
       } catch (err) {
-        console.error("Firestore update error:", err);
+        console.error("Supabase update error:", err);
       }
     }
   };
@@ -122,7 +124,9 @@ export default function Settings() {
   const handleConfirmLogout = async () => {
     setLoggingOut(true);
     try {
-      await logout();
+      // Đăng xuất bằng Supabase Auth
+      await supabase.auth.signOut();
+      
       useAuthStore.getState().setAuth(null, null);
       localStorage.removeItem('app_notif_settings');
       toast.success('Đã đăng xuất thành công khỏi tất cả thiết bị!');
@@ -140,8 +144,9 @@ export default function Settings() {
   const getFormattedJoinDate = () => {
     if (!user) return 'Chưa cập nhật';
     if (user.createdAt) {
-      if (user.createdAt.toDate) {
-        return user.createdAt.toDate().toLocaleDateString('vi-VN', { year: 'numeric', month: 'long', day: 'numeric' });
+      // Nếu là Date object (phòng trường hợp Supabase trả về object)
+      if (user.createdAt instanceof Date) {
+        return user.createdAt.toLocaleDateString('vi-VN', { year: 'numeric', month: 'long', day: 'numeric' });
       }
       if (typeof user.createdAt === 'string' || typeof user.createdAt === 'number') {
         return new Date(user.createdAt).toLocaleDateString('vi-VN', { year: 'numeric', month: 'long', day: 'numeric' });
