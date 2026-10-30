@@ -3,8 +3,8 @@ import {
   Mail, Send, Paperclip, CheckCircle2, AlertCircle, MessageSquare, 
   HelpCircle, Bug, Sparkles, UserCheck, FileText, X, ShieldAlert 
 } from 'lucide-react';
-import { collection, addDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Thay thế Firebase bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { enforceActivityCheck } from '../lib/restrictions';
 import toast from 'react-hot-toast';
@@ -97,6 +97,8 @@ export default function Contact() {
 
     setSubmitting(true);
     try {
+      const timestamp = new Date().toISOString();
+
       // Create contact_forms document
       const contactDoc = {
         name: senderName,
@@ -110,24 +112,31 @@ export default function Contact() {
         contactInfo: needsResponse === 'YES' ? contactInfo.trim() : null,
         senderId: user?.id || null,
         senderEmail: user?.email || null,
-        createdAt: new Date().toISOString(),
+        createdAt: timestamp,
         status: 'PENDING'
       };
 
-      await addDoc(collection(db, 'contact_forms'), contactDoc);
+      await supabase.from('contact_forms').insert(contactDoc);
 
       // Send notification to Admin queue
-      await addDoc(collection(db, 'notifications'), {
-        recipientId: 'ADMIN',
-        senderId: user?.id || 'GUEST',
-        senderName: senderName,
-        senderAvatar: user?.avatar || '',
-        type: 'CONTACT',
-        title: `Liên hệ mới: ${category}`,
-        message: `${senderName} đã gửi yêu cầu [${category}]: ${subjectTitle.trim() || content.trim().substring(0, 60)}...`,
-        read: false,
-        createdAt: new Date().toISOString()
-      });
+      const { data: adminUsers } = await supabase.from('users').select('id').eq('role', 'ADMIN');
+      
+      if (adminUsers && adminUsers.length > 0) {
+        for (const admin of adminUsers) {
+          await supabase.from('notifications').insert({
+            userId: admin.id,
+            recipientId: admin.id,
+            senderId: user?.id || 'GUEST',
+            senderName: senderName,
+            senderAvatar: user?.avatar || '',
+            type: 'CONTACT',
+            title: `Liên hệ mới: ${category}`,
+            message: `${senderName} đã gửi yêu cầu [${category}]: ${subjectTitle.trim() || content.trim().substring(0, 60)}...`,
+            read: false,
+            createdAt: timestamp
+          });
+        }
+      }
 
       setSubmittedSuccess(true);
       toast.success('Gửi yêu cầu liên hệ thành công!');
