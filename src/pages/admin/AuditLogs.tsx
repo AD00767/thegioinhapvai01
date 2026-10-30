@@ -5,11 +5,8 @@ import {
   Sparkles, FileText, AlertTriangle, ArrowRight,
   ChevronLeft, ChevronRight, Download
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, 
-  orderBy, limit, startAfter, where 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import toast from 'react-hot-toast';
 import { AuditLogItem } from '../../types';
 
@@ -17,9 +14,11 @@ export default function AuditLogs() {
   const [logs, setLogs] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('ALL');
-  const [lastDoc, setLastDoc] = useState<any>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
+  
+  // Track range for Supabase pagination
+  const ITEMS_PER_PAGE = 20;
 
   useEffect(() => {
     fetchLogs(true);
@@ -28,33 +27,37 @@ export default function AuditLogs() {
   const fetchLogs = async (isNew: boolean = false) => {
     setLoading(true);
     try {
-      let q = query(
-        collection(db, 'audit_logs'), 
-        orderBy('createdAt', 'desc'),
-        limit(20)
-      );
+      const currentPage = isNew ? 1 : page + 1;
+      const from = (currentPage - 1) * ITEMS_PER_PAGE;
+      const to = from + ITEMS_PER_PAGE - 1;
+
+      let query = supabase
+        .from('audit_logs')
+        .select('*')
+        .order('createdAt', { ascending: false })
+        .range(from, to);
 
       if (filter !== 'ALL') {
-        q = query(q, where('action', '==', filter));
+        query = query.eq('action', filter);
       }
 
-      if (!isNew && lastDoc) {
-        q = query(q, startAfter(lastDoc));
+      const { data: snap, error } = await query;
+
+      if (error) {
+        throw error;
       }
 
-      const snap = await getDocs(q);
-      const newLogs = snap.docs.map(d => ({ id: d.id, ...d.data() }) as AuditLogItem);
+      const newLogs = snap ? (snap as AuditLogItem[]) : [];
       
       if (isNew) {
         setLogs(newLogs);
         setPage(1);
       } else {
         setLogs([...logs, ...newLogs]);
-        setPage(page + 1);
+        setPage(currentPage);
       }
 
-      setLastDoc(snap.docs[snap.docs.length - 1]);
-      setHasMore(snap.docs.length === 20);
+      setHasMore(newLogs.length === ITEMS_PER_PAGE);
     } catch (err) {
       console.error("Error fetching logs:", err);
       toast.error("Không thể tải nhật ký hoạt động.");
