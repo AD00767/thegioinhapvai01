@@ -4,11 +4,8 @@ import {
   BadgeCheck, Plus, Trash2, Search, 
   Palette, Tag, User, ShieldCheck, X
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, 
-  orderBy, arrayUnion, arrayRemove, getDoc, serverTimestamp, addDoc 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { getValidAvatar } from '../../lib/avatar';
 import toast from 'react-hot-toast';
@@ -40,14 +37,18 @@ export default function BadgeManager() {
     if (!search.trim()) return;
     setLoading(true);
     try {
-      const q = query(collection(db, 'users'), orderBy('displayName'));
-      const snap = await getDocs(q);
-      const allUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setUsers(allUsers.filter((u: any) => 
-        u.displayName.toLowerCase().includes(search.toLowerCase()) ||
-        u.email?.toLowerCase().includes(search.toLowerCase())
-      ));
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .or(`displayName.ilike.%${search}%,email.ilike.%${search}%`)
+        .order('displayName', { ascending: true })
+        .limit(20); // Limit to avoid massive payloads on search
+        
+      if (error) throw error;
+      
+      setUsers(data || []);
     } catch (err) {
+      console.error(err);
       toast.error("Không thể tìm kiếm người dùng.");
     } finally {
       setLoading(false);
@@ -56,26 +57,33 @@ export default function BadgeManager() {
 
   const toggleBadge = async (userId: string, badgeId: string, hasBadge: boolean) => {
     try {
-      const userRef = doc(db, 'users', userId);
+      // Find current user badges
+      const currentUserData = users.find(u => u.id === userId);
+      let currentBadges: string[] = currentUserData?.badges || [];
+      
       if (hasBadge) {
-        await updateDoc(userRef, {
-          badges: arrayRemove(badgeId),
-          updatedAt: serverTimestamp()
-        });
-        toast.success("Đã gỡ Badge.");
+        currentBadges = currentBadges.filter(b => b !== badgeId);
       } else {
-        await updateDoc(userRef, {
-          badges: arrayUnion(badgeId),
-          updatedAt: serverTimestamp()
-        });
-        toast.success("Đã cấp Badge.");
+        currentBadges = [...currentBadges, badgeId];
       }
 
+      const { error } = await supabase
+        .from('users')
+        .update({ 
+          badges: currentBadges,
+          updatedAt: new Date().toISOString()
+        })
+        .eq('id', userId);
+
+      if (error) throw error;
+
+      toast.success(hasBadge ? "Đã gỡ Badge." : "Đã cấp Badge.");
+
       // Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
-        executorId: currentUser.id,
-        executorName: currentUser.displayName,
-        executorRole: currentUser.role,
+      await supabase.from('audit_logs').insert({
+        executorId: currentUser?.id,
+        executorName: currentUser?.displayName,
+        executorRole: currentUser?.role,
         action: hasBadge ? 'REMOVE_BADGE' : 'ADD_BADGE',
         targetId: userId,
         targetType: 'USER',
@@ -86,14 +94,17 @@ export default function BadgeManager() {
       // Update local state
       setUsers(users.map(u => {
         if (u.id === userId) {
-          const newBadges = hasBadge 
-            ? u.badges.filter((b: string) => b !== badgeId)
-            : [...(u.badges || []), badgeId];
-          return { ...u, badges: newBadges };
+          return { ...u, badges: currentBadges };
         }
         return u;
       }));
+      
+      if (selectedUser && selectedUser.id === userId) {
+        setSelectedUser({ ...selectedUser, badges: currentBadges });
+      }
+      
     } catch (err) {
+      console.error(err);
       toast.error("Thao tác thất bại.");
     }
   };
