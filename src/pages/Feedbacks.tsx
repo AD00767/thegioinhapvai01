@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  MessageSquare, Plus, Search, Filter, Globe, Lock, Mail, Inbox, Send, RefreshCw, Sparkles 
+  MessageSquare, Plus, Search, Globe, Lock, Mail, Inbox, Send, RefreshCw, Sparkles 
 } from 'lucide-react';
-import { collection, query, where, orderBy, getDocs } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Xóa Firebase, sử dụng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useSeo } from '../hooks/useSeo';
 import CreateFeedbackModal from '../components/feedback/CreateFeedbackModal';
@@ -29,85 +29,87 @@ export default function Feedbacks() {
     description: 'Nơi bạn có thể gửi góp ý công khai hoặc nhắn gửi thư riêng tư kín đáo tới Creator và các thành viên trong cộng đồng Google AI Studio.'
   });
 
-  // Fetch Feedbacks
+  // Fetch Feedbacks bằng Supabase
   const fetchFeedbacks = async () => {
     setLoading(true);
     try {
       let list: FeedbackItem[] = [];
 
       if (activeTab === 'ALL_PUBLIC') {
-        const q = query(
-          collection(db, 'feedbacks'),
-          where('mode', '==', 'PUBLIC')
-        );
-        const snap = await getDocs(q);
-        snap.docs.forEach(docSnap => {
-          const d = docSnap.data();
-          if (!d.deletedAt && !d.isHidden) {
-            list.push({ id: docSnap.id, ...d } as FeedbackItem);
-          }
-        });
+        const { data, error } = await supabase
+          .from('feedbacks')
+          .select('*')
+          .eq('mode', 'PUBLIC')
+          .is('deletedAt', null)
+          .is('isHidden', false)
+          .order('createdAt', { ascending: false });
+          
+        if (error) throw error;
+        if (data) list = data as FeedbackItem[];
+        
       } else if (user) {
         if (activeTab === 'RECEIVED') {
-          const q = query(
-            collection(db, 'feedbacks'),
-            where('recipientId', '==', user.id)
-          );
-          const snap = await getDocs(q);
-          snap.docs.forEach(docSnap => {
-            const d = docSnap.data();
-            if (!d.deletedAt && !d.isHidden) {
-              list.push({ id: docSnap.id, ...d } as FeedbackItem);
-            }
-          });
+          const { data, error } = await supabase
+            .from('feedbacks')
+            .select('*')
+            .eq('recipientId', user.id)
+            .is('deletedAt', null)
+            .is('isHidden', false)
+            .order('createdAt', { ascending: false });
+
+          if (error) throw error;
+          if (data) list = data as FeedbackItem[];
+          
         } else if (activeTab === 'SENT') {
-          const q = query(
-            collection(db, 'feedbacks'),
-            where('senderId', '==', user.id)
-          );
-          const snap = await getDocs(q);
-          snap.docs.forEach(docSnap => {
-            const d = docSnap.data();
-            if (!d.deletedAt && !d.isHidden) {
-              list.push({ id: docSnap.id, ...d } as FeedbackItem);
-            }
-          });
+          const { data, error } = await supabase
+            .from('feedbacks')
+            .select('*')
+            .eq('senderId', user.id)
+            .is('deletedAt', null)
+            .is('isHidden', false)
+            .order('createdAt', { ascending: false });
+
+          if (error) throw error;
+          if (data) list = data as FeedbackItem[];
+          
         } else if (activeTab === 'PRIVATE') {
-          const qSent = query(
-            collection(db, 'feedbacks'),
-            where('mode', '==', 'PRIVATE'),
-            where('senderId', '==', user.id)
-          );
-          const qReceived = query(
-            collection(db, 'feedbacks'),
-            where('mode', '==', 'PRIVATE'),
-            where('recipientId', '==', user.id)
-          );
+          // Lấy cả thư gửi đi và thư nhận được
+          const { data: sentData, error: sentError } = await supabase
+            .from('feedbacks')
+            .select('*')
+            .eq('mode', 'PRIVATE')
+            .eq('senderId', user.id)
+            .is('deletedAt', null)
+            .is('isHidden', false);
 
-          const [snapSent, snapReceived] = await Promise.all([
-            getDocs(qSent),
-            getDocs(qReceived)
-          ]);
+          const { data: receivedData, error: receivedError } = await supabase
+            .from('feedbacks')
+            .select('*')
+            .eq('mode', 'PRIVATE')
+            .eq('recipientId', user.id)
+            .is('deletedAt', null)
+            .is('isHidden', false);
 
+          if (sentError) throw sentError;
+          if (receivedError) throw receivedError;
+
+          const combined = [...(sentData || []), ...(receivedData || [])];
+          
+          // Lọc trùng lặp bằng Set (đề phòng có thư tự gửi cho mình)
           const seenIds = new Set<string>();
-          const addDoc = (docSnap: any) => {
-            if (seenIds.has(docSnap.id)) return;
-            seenIds.add(docSnap.id);
-            const d = docSnap.data();
-            if (!d.deletedAt && !d.isHidden) {
-              list.push({ id: docSnap.id, ...d } as FeedbackItem);
+          for (const item of combined) {
+            if (!seenIds.has(item.id)) {
+              seenIds.add(item.id);
+              list.push(item as FeedbackItem);
             }
-          };
-
-          snapSent.docs.forEach(addDoc);
-          snapReceived.docs.forEach(addDoc);
+          }
         }
       }
 
-      // Sort client-side by createdAt desc
+      // Sắp xếp lại theo thời gian mới nhất
       list.sort((a, b) => {
-        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (new Date(a.createdAt || 0).getTime());
-        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (new Date(b.createdAt || 0).getTime());
+        const timeA = new Date(a.createdAt || 0).getTime();
+        const timeB = new Date(b.createdAt || 0).getTime();
         return timeB - timeA;
       });
 
@@ -124,7 +126,7 @@ export default function Feedbacks() {
     fetchFeedbacks();
   }, [activeTab, user?.id]);
 
-  // Filter Logic
+  // Filter Logic (Lọc dữ liệu đã lấy được)
   const filteredFeedbacks = feedbacks.filter(fb => {
     // Search Term match
     const search = searchTerm.toLowerCase();
@@ -136,11 +138,9 @@ export default function Feedbacks() {
 
     if (!matchSearch) return false;
 
-    // Tab filtering
-    if (activeTab === 'ALL_PUBLIC') {
-      return fb.mode === 'PUBLIC';
-    }
-
+    // Tab filtering (Đã được lọc chính bên API, giữ lại cho an toàn)
+    if (activeTab === 'ALL_PUBLIC') return fb.mode === 'PUBLIC';
+    
     if (activeTab === 'RECEIVED') {
       if (!user) return false;
       return fb.recipientId === user.id && (fb.mode === 'PUBLIC' || fb.mode === 'PRIVATE');
