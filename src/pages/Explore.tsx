@@ -3,8 +3,8 @@ import {
   Compass, Sparkles, User as UserIcon, PenTool, BookOpen, 
   Search, Filter, Flame, Clock, Star, ArrowRight, Tag as TagIcon, RefreshCw, X, SlidersHorizontal
 } from 'lucide-react';
-import { collection, getDocs, doc, deleteDoc, query, where, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../lib/supabase';
 import { CharacterItem, PromptItem, CreatorItem } from '../types';
 import CharacterCard from '../components/CharacterCard';
 import PromptCard from '../components/PromptCard';
@@ -57,36 +57,48 @@ export default function Explore() {
   const loadData = async () => {
     setLoading(true);
     try {
-      // 1. Fetch Characters (limit 50)
-      const charsQuery = query(collection(db, 'characters'), limit(50));
-      const charsSnap = await getDocs(charsQuery);
-      const rawChars: CharacterItem[] = charsSnap.docs
-        .map(d => ({ id: d.id, ...d.data() } as CharacterItem))
-        .filter((c: any) => !c.deletedAt && !c.isHidden);
-      setAllCharacters(rawChars);
+      // 1. Fetch Characters using Supabase
+      const { data: charsData } = await supabase
+        .from('characters')
+        .select('*')
+        .is('deletedAt', null)
+        .is('isHidden', false)
+        .limit(50);
+        
+      if (charsData) setAllCharacters(charsData as CharacterItem[]);
 
       // Extract unique tags
       const tagsSet = new Set<string>();
-      rawChars.forEach(c => c.tags?.forEach(t => tagsSet.add(t)));
+      if (charsData) {
+        charsData.forEach((c: any) => c.tags?.forEach((t: string) => tagsSet.add(t)));
+      }
 
-      // 2. Fetch Prompts (limit 50)
-      const promptsQuery = query(collection(db, 'prompts'), limit(50));
-      const promptsSnap = await getDocs(promptsQuery);
-      const rawPrompts: PromptItem[] = promptsSnap.docs
-        .map(d => ({ id: d.id, ...d.data() } as PromptItem))
-        .filter((p: any) => !p.deletedAt && !p.isHidden);
-      setAllPrompts(rawPrompts);
-
-      rawPrompts.forEach(p => p.tags?.forEach(t => tagsSet.add(t)));
+      // 2. Fetch Prompts using Supabase
+      const { data: promptsData } = await supabase
+        .from('prompts')
+        .select('*')
+        .is('deletedAt', null)
+        .is('isHidden', false)
+        .limit(50);
+        
+      if (promptsData) {
+        setAllPrompts(promptsData as PromptItem[]);
+        promptsData.forEach((p: any) => p.tags?.forEach((t: string) => tagsSet.add(t)));
+      }
+      
       setAllTags(Array.from(tagsSet).slice(0, 15));
 
-      // 3. Fetch Creators (limit 50 creators)
-      const creatorsQuery = query(collection(db, 'users'), where('creatorStatus', '==', true), limit(50));
-      const creatorsSnap = await getDocs(creatorsQuery);
-      const rawCreators: CreatorItem[] = creatorsSnap.docs
-        .map(d => ({ id: d.id, ...d.data() } as CreatorItem))
-        .filter((u: any) => !u.deletedAt && !u.isHidden && !u.isLocked);
-      setAllCreators(rawCreators);
+      // 3. Fetch Creators using Supabase
+      const { data: creatorsData } = await supabase
+        .from('users')
+        .select('*')
+        .eq('creatorStatus', true)
+        .is('deletedAt', null)
+        .is('isHidden', false)
+        .is('isLocked', false)
+        .limit(50);
+        
+      if (creatorsData) setAllCreators(creatorsData as CreatorItem[]);
 
     } catch (err) {
       console.error("Explore load data error:", err);
@@ -149,15 +161,11 @@ export default function Explore() {
 
   const isSearchActive = searchQuery.trim().length > 0 || selectedTag !== null;
 
-  // ==========================================
-  // REAL SEARCH FILTERING LOGIC
-  // Matches all fields: Name, Slogan, Plot, Purpose, Content, Tags, Creator, ID, NumericID
-  // ==========================================
   const filteredCharacters = useMemo(() => {
     const term = searchQuery.trim();
     return allCharacters.filter(c => {
       const matchesSearch = !term || matchesItemFields(
-        [c.name, c.slogan, c.plot, c.tags, c.creatorName, c.gender, c.characterLink, c.numericId, c.id],
+        [c.name, c.slogan, c.plot, c.tags?.join(' '), c.creatorName, c.gender, c.characterLink, c.numericId, c.id],
         term
       );
       const matchesTag = selectedTag ? c.tags?.some(t => matchesSearchText(t, selectedTag)) : true;
@@ -173,7 +181,6 @@ export default function Explore() {
         const timeB = new Date(b.createdAt || 0).getTime();
         return timeB - timeA;
       }
-      // Relevance (pinned first, then popular score)
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       const scoreA = (a.likesCount || 0) * 3 + (a.savesCount || 0) * 2 + (a.viewsCount || 0);
       const scoreB = (b.likesCount || 0) * 3 + (b.savesCount || 0) * 2 + (b.viewsCount || 0);
@@ -185,7 +192,7 @@ export default function Explore() {
     const term = searchQuery.trim();
     return allPrompts.filter(p => {
       const matchesSearch = !term || matchesItemFields(
-        [p.name, p.title, p.purpose, p.content, p.tags, p.authorName, p.numericId, p.id],
+        [p.name, p.title, p.purpose, p.content, p.tags?.join(' '), p.authorName, p.numericId, p.id],
         term
       );
       const matchesTag = selectedTag ? p.tags?.some(t => matchesSearchText(t, selectedTag)) : true;
@@ -235,7 +242,6 @@ export default function Explore() {
 
   const totalMatches = filteredCharacters.length + filteredPrompts.length + filteredCreators.length;
 
-  // Browse mode subsets
   const featuredCharacters = useMemo(() => {
     return [...allCharacters]
       .sort((a, b) => {
@@ -391,9 +397,7 @@ export default function Explore() {
           ))}
         </div>
       ) : isSearchActive ? (
-        // ====================================================================
-        // SEARCH RESULTS MODE (HIỂN THỊ KẾT QUẢ TÌM KIẾM THỰC TẾ TRÊN TẤT CẢ DỮ LIỆU)
-        // ====================================================================
+        // SEARCH RESULTS MODE
         <div className="space-y-6">
           {/* Header Bar for Search Results */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
@@ -438,7 +442,7 @@ export default function Explore() {
             </div>
           </div>
 
-          {/* Category Tabs: Tất cả | Character | Prompt | Creator */}
+          {/* Category Tabs */}
           <div className="flex items-center gap-2 overflow-x-auto pb-1 border-b border-neutral-200 dark:border-neutral-800">
             <button
               onClick={() => setSearchCategoryTab('ALL')}
@@ -485,7 +489,7 @@ export default function Explore() {
             </button>
           </div>
 
-          {/* EMPTY STATE: KHÔNG TÌM THẤY KẾT QUẢ PHÙ HỢP */}
+          {/* EMPTY STATE */}
           {totalMatches === 0 ? (
             <div className="py-16 px-6 text-center rounded-3xl border border-dashed border-neutral-300 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30 max-w-xl mx-auto space-y-4">
               <div className="w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center mx-auto text-neutral-500">
@@ -514,7 +518,6 @@ export default function Explore() {
               </div>
             </div>
           ) : (
-            // DISPLAY ALL RESULTS (NO SLICE!)
             <div className="space-y-12">
               {/* 1. Characters Section */}
               {(searchCategoryTab === 'ALL' || searchCategoryTab === 'CHARACTERS') && filteredCharacters.length > 0 && (
@@ -575,9 +578,7 @@ export default function Explore() {
           )}
         </div>
       ) : (
-        // ====================================================================
-        // STANDARD EXPLORE BROWSE MODE (KHI KHÔNG TÌM KIẾM)
-        // ====================================================================
+        // STANDARD EXPLORE BROWSE MODE
         <div className="space-y-10">
           {/* Navigation Filter Tabs */}
           <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-neutral-200 dark:border-neutral-800">
