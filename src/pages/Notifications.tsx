@@ -3,14 +3,11 @@ import {
   Bell, UserPlus, MessageSquare, Heart, Bookmark, CheckCheck, Trash2, Filter, Sparkles, RefreshCw, MessageCircle,
   Shield, Check, X, HelpCircle, ShieldCheck, Megaphone
 } from 'lucide-react';
-import { 
-  collection, query, where, getDocs, doc, updateDoc, deleteDoc, orderBy, writeBatch, addDoc, limit
-} from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Xóa Firebase, thay bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { getDoc } from 'firebase/firestore';
 import { getValidAvatar } from '../lib/avatar';
 import DeletedContentModal from '../components/DeletedContentModal';
 import RemovalDetailModal from '../components/modals/RemovalDetailModal';
@@ -87,54 +84,53 @@ export default function Notifications() {
     if (!user) return;
     setLoading(true);
     try {
-      // Query notifications where recipientId == user.id OR userId == user.id OR recipientId == 'ALL'
-      const qRecipient = query(
-        collection(db, 'notifications'),
-        where('recipientId', '==', user.id),
-        limit(40)
-      );
-      const qUser = query(
-        collection(db, 'notifications'),
-        where('userId', '==', user.id),
-        limit(40)
-      );
-      const qBroadcast = query(
-        collection(db, 'notifications'),
-        where('recipientId', '==', 'ALL'),
-        limit(20)
-      );
+      // 1. Fetch theo recipientId (Người nhận đích danh)
+      const { data: recipientData } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('recipientId', user.id)
+        .order('createdAt', { ascending: false })
+        .limit(40);
 
-      const [snapRecipient, snapUser, snapBroadcast] = await Promise.all([
-        getDocs(qRecipient),
-        getDocs(qUser),
-        getDocs(qBroadcast)
-      ]);
+      // 2. Fetch theo userId (Định dạng cũ)
+      const { data: userData } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('userId', user.id)
+        .order('createdAt', { ascending: false })
+        .limit(40);
+
+      // 3. Fetch theo Broadcast (Thông báo toàn hệ thống)
+      const { data: broadcastData } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('recipientId', 'ALL')
+        .order('createdAt', { ascending: false })
+        .limit(20);
 
       const map = new Map<string, NotificationItem>();
 
       const parseDoc = (d: any) => {
-        const data = d.data();
-        const isBroadcast = data.recipientId === 'ALL' || data.isSystemBroadcast === true;
+        const isBroadcast = d.recipientId === 'ALL' || d.isSystemBroadcast === true;
         const isRead = isBroadcast 
-          ? (Array.isArray(data.readBy) && data.readBy.includes(user.id))
-          : (data.read !== undefined ? data.read : (data.isRead !== undefined ? data.isRead : false));
+          ? (Array.isArray(d.readBy) && d.readBy.includes(user.id))
+          : (d.read !== undefined ? d.read : (d.isRead !== undefined ? d.isRead : false));
 
         return {
           id: d.id,
-          ...data,
-          // Normalize message/body/content
-          message: data.message || data.body || data.content || data.markdownContent || '',
+          ...d,
+          message: d.message || d.body || d.content || d.markdownContent || '',
           read: isRead
         } as NotificationItem;
       };
 
-      snapRecipient.docs.forEach(d => map.set(d.id, parseDoc(d)));
-      snapUser.docs.forEach(d => map.set(d.id, parseDoc(d)));
-      snapBroadcast.docs.forEach(d => map.set(d.id, parseDoc(d)));
+      if (recipientData) recipientData.forEach(d => map.set(d.id, parseDoc(d)));
+      if (userData) userData.forEach(d => map.set(d.id, parseDoc(d)));
+      if (broadcastData) broadcastData.forEach(d => map.set(d.id, parseDoc(d)));
 
       const list = Array.from(map.values()).sort((a, b) => {
-        const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt || 0).getTime();
-        const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt || 0).getTime();
+        const timeA = new Date(a.createdAt || 0).getTime();
+        const timeB = new Date(b.createdAt || 0).getTime();
         return timeB - timeA;
       });
 
@@ -151,22 +147,20 @@ export default function Notifications() {
     fetchNotifications();
   }, [user?.id]);
 
-  // Mark single notification as read
+  // Đánh dấu 1 thông báo là đã đọc
   const handleMarkAsRead = async (notifId: string) => {
     if (!user) return;
     try {
       const notif = notifications.find(n => n.id === notifId);
-      const notifRef = doc(db, 'notifications', notifId);
 
       if (notif && (notif.recipientId === 'ALL' || notif.isSystemBroadcast)) {
         const currentReadBy = Array.isArray(notif.readBy) ? notif.readBy : [];
         if (!currentReadBy.includes(user.id)) {
-          await updateDoc(notifRef, {
-            readBy: [...currentReadBy, user.id]
-          });
+          const newReadBy = [...currentReadBy, user.id];
+          await supabase.from('notifications').update({ readBy: newReadBy }).eq('id', notifId);
         }
       } else {
-        await updateDoc(notifRef, { read: true });
+        await supabase.from('notifications').update({ read: true, isRead: true }).eq('id', notifId);
       }
 
       setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
@@ -175,26 +169,24 @@ export default function Notifications() {
     }
   };
 
-  // Mark all as read
+  // Đánh dấu tất cả là đã đọc
   const handleMarkAllAsRead = async () => {
     if (!user) return;
     const unread = notifications.filter(n => !n.read);
     if (unread.length === 0) return;
 
     try {
-      const batch = writeBatch(db);
-      unread.forEach(n => {
-        const notifRef = doc(db, 'notifications', n.id);
+      for (const n of unread) {
         if (n.recipientId === 'ALL' || n.isSystemBroadcast) {
           const currentReadBy = Array.isArray(n.readBy) ? n.readBy : [];
           if (!currentReadBy.includes(user.id)) {
-            batch.update(notifRef, { readBy: [...currentReadBy, user.id] });
+            const newReadBy = [...currentReadBy, user.id];
+            await supabase.from('notifications').update({ readBy: newReadBy }).eq('id', n.id);
           }
         } else {
-          batch.update(notifRef, { read: true });
+          await supabase.from('notifications').update({ read: true, isRead: true }).eq('id', n.id);
         }
-      });
-      await batch.commit();
+      }
 
       setNotifications(prev => prev.map(n => ({ ...n, read: true })));
       toast.success("Đã đánh dấu tất cả thông báo là đã đọc!");
@@ -204,11 +196,11 @@ export default function Notifications() {
     }
   };
 
-  // Delete notification
+  // Xóa thông báo
   const handleDeleteNotif = async (notifId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      await deleteDoc(doc(db, 'notifications', notifId));
+      await supabase.from('notifications').delete().eq('id', notifId);
       setNotifications(prev => prev.filter(n => n.id !== notifId));
       toast.success("Đã xóa thông báo.");
     } catch (err) {
@@ -221,42 +213,40 @@ export default function Notifications() {
     e.stopPropagation();
     if (!user) return;
     try {
-      // 1. Update user role and status in Firestore
-      await updateDoc(doc(db, 'users', user.id), {
+      const timestamp = new Date().toISOString();
+
+      await supabase.from('users').update({
         role: 'MODERATOR',
         permissions: ['MANAGE_REPORTS', 'MANAGE_CONTENT', 'MANAGE_USERS'],
         moderatorInviteStatus: 'ACCEPTED',
-        updatedAt: new Date().toISOString()
-      });
+        updatedAt: timestamp
+      }).eq('id', user.id);
 
-      // 2. Mark this notification as read & record invite status
-      await updateDoc(doc(db, 'notifications', notif.id), {
+      await supabase.from('notifications').update({
         read: true,
         inviteStatus: 'ACCEPTED',
         message: 'Bạn đã chấp nhận lời mời trở thành Moderator của hệ thống.'
-      });
+      }).eq('id', notif.id);
 
-      // 3. Send notification to Admins
       try {
-        const adminQuery = query(collection(db, 'users'), where('role', '==', 'ADMIN'));
-        const adminSnap = await getDocs(adminQuery);
-        const notifPromises = adminSnap.docs.map(adminDoc => 
-          addDoc(collection(db, 'notifications'), {
-            userId: adminDoc.id,
-            recipientId: adminDoc.id,
-            type: 'MODERATOR_RESPONSE',
-            title: 'Thành viên chấp nhận lời mời Moderator',
-            message: `Thành viên ${user.displayName || ('Thành viên #' + (user.numericId || user.id.substring(0, 6)))} đã CHẤP NHẬN lời mời trở thành Moderator của hệ thống.`,
-            read: false,
-            createdAt: new Date().toISOString()
-          })
-        );
-        await Promise.all(notifPromises);
+        const { data: adminUsers } = await supabase.from('users').select('id').eq('role', 'ADMIN');
+        if (adminUsers) {
+          for (const admin of adminUsers) {
+            await supabase.from('notifications').insert({
+              userId: admin.id,
+              recipientId: admin.id,
+              type: 'MODERATOR_RESPONSE',
+              title: 'Thành viên chấp nhận lời mời Moderator',
+              message: `Thành viên ${user.displayName || ('Thành viên #' + (user.numericId || user.id.substring(0, 6)))} đã CHẤP NHẬN lời mời trở thành Moderator của hệ thống.`,
+              read: false,
+              createdAt: timestamp
+            });
+          }
+        }
       } catch (adminErr) {
         console.error("Error notifying admins:", adminErr);
       }
 
-      // 4. Update auth store local state so menu/sidebar updates instantly!
       const { setAuth } = useAuthStore.getState();
       const updatedUser = { 
         ...user, 
@@ -266,7 +256,6 @@ export default function Notifications() {
       };
       setAuth(useAuthStore.getState().firebaseUser, updatedUser);
 
-      // 5. Toast notification
       toast.success("Chấp nhận lời mời thành công! Bạn đã trở thành Moderator.");
       fetchNotifications();
     } catch (err) {
@@ -279,40 +268,38 @@ export default function Notifications() {
     e.stopPropagation();
     if (!user) return;
     try {
-      // 1. Update user status in Firestore
-      await updateDoc(doc(db, 'users', user.id), {
-        moderatorInviteStatus: 'REJECTED',
-        updatedAt: new Date().toISOString()
-      });
+      const timestamp = new Date().toISOString();
 
-      // 2. Mark this notification as read & record invite status
-      await updateDoc(doc(db, 'notifications', notif.id), {
+      await supabase.from('users').update({
+        moderatorInviteStatus: 'REJECTED',
+        updatedAt: timestamp
+      }).eq('id', user.id);
+
+      await supabase.from('notifications').update({
         read: true,
         inviteStatus: 'REJECTED',
         message: 'Bạn đã từ chối lời mời trở thành Moderator của hệ thống.'
-      });
+      }).eq('id', notif.id);
 
-      // 3. Send notification to Admins
       try {
-        const adminQuery = query(collection(db, 'users'), where('role', '==', 'ADMIN'));
-        const adminSnap = await getDocs(adminQuery);
-        const notifPromises = adminSnap.docs.map(adminDoc => 
-          addDoc(collection(db, 'notifications'), {
-            userId: adminDoc.id,
-            recipientId: adminDoc.id,
-            type: 'MODERATOR_RESPONSE',
-            title: 'Thành viên từ chối lời mời Moderator',
-            message: `Thành viên ${user.displayName || ('Thành viên #' + (user.numericId || user.id.substring(0, 6)))} đã TỪ CHỐI lời mời trở thành Moderator của hệ thống.`,
-            read: false,
-            createdAt: new Date().toISOString()
-          })
-        );
-        await Promise.all(notifPromises);
+        const { data: adminUsers } = await supabase.from('users').select('id').eq('role', 'ADMIN');
+        if (adminUsers) {
+          for (const admin of adminUsers) {
+            await supabase.from('notifications').insert({
+              userId: admin.id,
+              recipientId: admin.id,
+              type: 'MODERATOR_RESPONSE',
+              title: 'Thành viên từ chối lời mời Moderator',
+              message: `Thành viên ${user.displayName || ('Thành viên #' + (user.numericId || user.id.substring(0, 6)))} đã TỪ CHỐI lời mời trở thành Moderator của hệ thống.`,
+              read: false,
+              createdAt: timestamp
+            });
+          }
+        }
       } catch (adminErr) {
         console.error("Error notifying admins:", adminErr);
       }
 
-      // 4. Update local user state
       const { setAuth } = useAuthStore.getState();
       const updatedUser = { 
         ...user, 
@@ -320,7 +307,6 @@ export default function Notifications() {
       };
       setAuth(useAuthStore.getState().firebaseUser, updatedUser);
 
-      // 5. Toast notification
       toast.success("Từ chối lời mời thành công.");
       fetchNotifications();
     } catch (err) {
@@ -333,36 +319,27 @@ export default function Notifications() {
     e.preventDefault();
     e.stopPropagation();
 
-    // Mark as read
     if (!notif.read) {
       handleMarkAsRead(notif.id);
     }
 
     if (notif.isSystem || notif.type === 'SYSTEM' || notif.type === 'SYSTEM_BROADCAST' || notif.markdownContent) {
-      setSystemModalData({
-        isOpen: true,
-        notification: notif
-      });
+      setSystemModalData({ isOpen: true, notification: notif });
       return;
     }
 
     if (notif.type === 'SUPPORT_REPLY' || notif.targetType === 'SUPPORT_TICKET') {
-      setSupportModalData({
-        isOpen: true,
-        notification: notif
-      });
+      setSupportModalData({ isOpen: true, notification: notif });
       return;
     }
 
     if (!notif.link) return;
 
-    // Check if target content exists for Feedback or Comment
-    if (notif.type === 'FEEDBACK' || notif.type === 'COMMENT' || notif.targetType === 'FEEDBACK' || notif.targetType === 'COMMENT') {
+    if (['FEEDBACK', 'COMMENT'].includes(notif.type) || ['FEEDBACK', 'COMMENT'].includes(notif.targetType || '')) {
       setCheckingContent(true);
       try {
         let exists = true;
         
-        // If we have targetId and targetType, use them
         if (notif.targetId && notif.targetType) {
           const collectionMap: Record<string, string> = {
             'CHARACTER': 'characters',
@@ -371,11 +348,11 @@ export default function Notifications() {
             'COMMENT': 'comments'
           };
           
-          const collectionName = collectionMap[notif.targetType] || 
-                               (notif.type === 'FEEDBACK' ? 'feedbacks' : 'comments');
+          const collectionName = collectionMap[notif.targetType] || (notif.type === 'FEEDBACK' ? 'feedbacks' : 'comments');
 
-          const docSnap = await getDoc(doc(db, collectionName, notif.targetId));
-          if (!docSnap.exists() || docSnap.data().deletedAt) {
+          const { data } = await supabase.from(collectionName).select('id, deletedAt').eq('id', notif.targetId).single();
+          
+          if (!data || data.deletedAt) {
             exists = false;
           }
         } 
@@ -395,9 +372,7 @@ export default function Notifications() {
     navigate(notif.link);
   };
 
-  // Filtered Notifications
   const filteredNotifications = notifications.filter(n => {
-    // Category check
     let matchesCategory = true;
     if (categoryFilter === 'SYSTEM') {
       matchesCategory = n.isSystem === true || n.type === 'SYSTEM' || n.type === 'SYSTEM_BROADCAST' || n.isSystemBroadcast === true || ['MODERATOR_INVITE', 'SUPPORT_REPLY', 'CONTENT_REMOVED', 'ACCOUNT_LOCKED', 'APPEAL_APPROVED', 'APPEAL_REJECTED'].includes(n.type);
@@ -411,7 +386,6 @@ export default function Notifications() {
       matchesCategory = ['CHARACTER_LIKE', 'CHARACTER_SAVE', 'PROMPT_SAVE', 'LIKE', 'BOOKMARK', 'SAVE'].includes(n.type);
     }
 
-    // Read status check
     let matchesRead = true;
     if (readFilter === 'UNREAD') matchesRead = !n.read;
     if (readFilter === 'READ') matchesRead = n.read;
@@ -421,7 +395,6 @@ export default function Notifications() {
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
-  // Helper for notification icon
   const getIconForType = (type: string) => {
     switch (type) {
       case 'SYSTEM':
@@ -612,10 +585,7 @@ export default function Notifications() {
       ) : (
         <div className="space-y-3">
           {filteredNotifications.map(notif => {
-            const timeFormatted = notif.createdAt?.toDate 
-              ? notif.createdAt.toDate().toLocaleString('vi-VN') 
-              : new Date(notif.createdAt || 0).toLocaleString('vi-VN');
-
+            const timeFormatted = new Date(notif.createdAt || 0).toLocaleString('vi-VN');
             const isSystemNotif = notif.isSystem || notif.type === 'SYSTEM' || notif.type === 'SYSTEM_BROADCAST' || !!notif.markdownContent;
 
             return (
@@ -645,12 +615,10 @@ export default function Notifications() {
                     : 'bg-white dark:bg-neutral-900 border-amber-500/40 dark:border-amber-500/30 shadow-sm ring-1 ring-amber-500/10'
                 }`}
               >
-                {/* Unread indicator dot */}
                 {!notif.read && (
                   <span className="absolute top-4 right-4 w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
                 )}
 
-                {/* Avatar / Icon */}
                 <div className="relative shrink-0">
                   <img
                     src={getValidAvatar(notif.senderAvatar)}
@@ -662,7 +630,6 @@ export default function Notifications() {
                   </div>
                 </div>
 
-                {/* Main Content */}
                 <div className="flex-1 min-w-0 space-y-1">
                   <div className="flex items-center justify-between gap-2 pr-6">
                     <h4 className="font-bold text-sm text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
@@ -730,7 +697,6 @@ export default function Notifications() {
                   )}
                 </div>
 
-                {/* Action Buttons: Delete */}
                 <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
                     onClick={(e) => handleDeleteNotif(notif.id, e)}
@@ -746,14 +712,13 @@ export default function Notifications() {
         </div>
       )}
 
-      {/* Deleted Content Modal */}
+      {/* Modal Components remain the same */}
       <DeletedContentModal 
         isOpen={isDeletedModalOpen}
         onClose={() => setIsDeletedModalOpen(false)}
         type={deletedType}
       />
 
-      {/* Removal & Appeal Modal */}
       {removalModalData.targetId && (
         <RemovalDetailModal
           isOpen={removalModalData.isOpen}
@@ -767,14 +732,12 @@ export default function Notifications() {
         />
       )}
 
-      {/* Support Reply Detail Modal */}
       <SupportReplyModal
         isOpen={supportModalData.isOpen}
         onClose={() => setSupportModalData(prev => ({ ...prev, isOpen: false }))}
         notification={supportModalData.notification}
       />
 
-      {/* System Notification Detail Modal */}
       <SystemNotificationModal
         isOpen={systemModalData.isOpen}
         onClose={() => setSystemModalData(prev => ({ ...prev, isOpen: false }))}
