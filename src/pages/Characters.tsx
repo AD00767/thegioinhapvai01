@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Users, Search, Plus, Sparkles, Filter, RefreshCw, Flame, Clock, Calendar, ArrowUpDown
 } from 'lucide-react';
-import { collection, query, getDocs, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Xóa Firebase, thay bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useSeo } from '../hooks/useSeo';
 import { CharacterItem } from '../types';
@@ -50,18 +50,21 @@ export default function Characters() {
   const fetchCharacters = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'characters'), limit(60));
-      const snap = await getDocs(q);
-      const list: CharacterItem[] = [];
+      // Dùng Supabase thay vì Firebase
+      const { data, error } = await supabase
+        .from('characters')
+        .select('*')
+        .is('deletedAt', null)
+        .is('isHidden', false)
+        .limit(60);
 
-      snap.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        if (!data.deletedAt && !data.isHidden) {
-          list.push({ id: docSnap.id, ...data } as CharacterItem);
-        }
-      });
+      if (error) {
+        throw error;
+      }
 
-      setCharacters(list);
+      if (data) {
+        setCharacters(data as CharacterItem[]);
+      }
     } catch (err) {
       console.error("Lỗi khi tải danh sách Character:", err);
       toast.error("Không thể tải danh sách Character.");
@@ -115,7 +118,7 @@ export default function Characters() {
     .filter(c => {
       const term = searchTerm.trim();
       const matchesSearch = !term || matchesItemFields(
-        [c.name, c.slogan, c.plot, c.tags, c.creatorName, c.gender, c.characterLink, c.numericId, c.id],
+        [c.name, c.slogan, c.plot, c.tags?.join(' '), c.creatorName, c.gender, c.characterLink, c.numericId, c.id],
         term
       );
 
@@ -147,7 +150,6 @@ export default function Characters() {
       return 0;
     });
 
-  // Calculate stats for header
   const totalCharacters = characters.length;
   const featuredCount = characters.filter(c => ((c.likesCount || 0) > 0 || (c.savesCount || 0) > 0)).length;
 
