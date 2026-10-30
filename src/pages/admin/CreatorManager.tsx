@@ -5,11 +5,8 @@ import {
   ExternalLink, User, ShieldCheck, Mail,
   MessageSquare, Search, Filter, Sparkles, ShieldAlert
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, 
-  orderBy, where, serverTimestamp, addDoc, getDoc 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { getValidAvatar } from '../../lib/avatar';
 import toast from 'react-hot-toast';
@@ -38,10 +35,14 @@ export default function CreatorManager() {
 
   const fetchUserDetails = async (userId: string) => {
     try {
-      const userRef = doc(db, 'users', userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        setSelectedUser(userSnap.data());
+      const { data } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (data) {
+        setSelectedUser(data);
       }
     } catch (err) {
       console.error("Error fetching user details:", err);
@@ -51,13 +52,14 @@ export default function CreatorManager() {
   const fetchRequests = async () => {
     setLoading(true);
     try {
-      const q = query(
-        collection(db, 'creator_requests'), 
-        where('status', '==', filter),
-        orderBy('createdAt', 'desc')
-      );
-      const snap = await getDocs(q);
-      setRequests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const { data, error } = await supabase
+        .from('creator_requests')
+        .select('*')
+        .eq('status', filter)
+        .order('createdAt', { ascending: false });
+
+      if (error) throw error;
+      setRequests(data || []);
     } catch (err) {
       console.error("Error fetching requests:", err);
       toast.error("Không thể tải danh sách yêu cầu.");
@@ -81,72 +83,80 @@ export default function CreatorManager() {
     }
 
     try {
-      const requestRef = doc(db, 'creator_requests', selectedRequest.id);
-      await updateDoc(requestRef, {
+      const timestamp = new Date().toISOString();
+
+      await supabase.from('creator_requests').update({
         status,
         moderatorId: currentUser.id,
         moderatorNote: note,
-        updatedAt: serverTimestamp()
-      });
+        updatedAt: timestamp
+      }).eq('id', selectedRequest.id);
 
       if (status === 'APPROVED') {
-        const userRef = doc(db, 'users', selectedRequest.userId);
-        await updateDoc(userRef, {
+        await supabase.from('users').update({
           creatorStatus: true,
-          updatedAt: serverTimestamp()
-        });
+          creatorRequestStatus: 'APPROVED',
+          updatedAt: timestamp
+        }).eq('id', selectedRequest.userId);
 
         // Update global_ids mapping if numericId exists
         if (selectedUser?.numericId) {
-          const idRef = doc(db, 'global_ids', selectedUser.numericId);
-          await updateDoc(idRef, {
+          await supabase.from('global_ids').update({
             objectType: 'creator',
-            updatedAt: serverTimestamp()
-          }).catch(err => console.warn("Failed to update global_ids mapping:", err));
+            updatedAt: timestamp
+          }).eq('id', selectedUser.numericId).catch(err => console.warn("Failed to update global_ids mapping:", err));
         }
 
         // Send notification
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           userId: selectedRequest.userId,
+          recipientId: selectedRequest.userId,
           title: 'Chúc mừng! Bạn đã trở thành Creator',
-          content: 'Yêu cầu của bạn đã được phê duyệt. Bây giờ bạn có thể tạo Character và truy cập Bảng điều khiển Creator.',
+          message: 'Yêu cầu của bạn đã được phê duyệt. Bây giờ bạn có thể tạo Character và truy cập Bảng điều khiển Creator.',
           type: 'SYSTEM',
           read: false,
-          createdAt: serverTimestamp()
+          createdAt: timestamp
         });
 
         toast.success("Đã phê duyệt và cấp quyền Creator.");
       } else {
         // Send notification for rejection
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           userId: selectedRequest.userId,
+          recipientId: selectedRequest.userId,
           title: 'Yêu cầu trở thành Creator bị từ chối',
-          content: `Rất tiếc, yêu cầu của bạn không được phê duyệt. Lý do: ${note}`,
+          message: `Rất tiếc, yêu cầu của bạn không được phê duyệt. Lý do: ${note}`,
           type: 'SYSTEM',
           read: false,
-          createdAt: serverTimestamp()
+          createdAt: timestamp
         });
+
+        await supabase.from('users').update({
+          creatorRequestStatus: 'REJECTED',
+          updatedAt: timestamp
+        }).eq('id', selectedRequest.userId);
 
         toast.success("Đã từ chối yêu cầu.");
       }
 
       // Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
-        executorId: currentUser.id,
-        executorName: currentUser.displayName,
-        executorRole: currentUser.role,
+      await supabase.from('audit_logs').insert({
+        executorId: currentUser?.id,
+        executorName: currentUser?.displayName,
+        executorRole: currentUser?.role,
         action: status === 'APPROVED' ? 'APPROVE_CREATOR' : 'REJECT_CREATOR',
         targetId: selectedRequest.userId,
         targetType: 'USER',
-        details: `${status === 'APPROVED' ? 'Phê duyệt' : 'Từ chối'} yêu cầu làm Creator của ${selectedRequest.displayName}`,
+        details: `${status === 'APPROVED' ? 'Phê duyệt' : 'Từ chối'} yêu cầu làm Creator của ${selectedRequest.userDisplayName || 'người dùng'}`,
         reason: note,
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
       setSelectedRequest(null);
       setNote('');
       fetchRequests();
     } catch (err) {
+      console.error(err);
       toast.error("Thao tác thất bại.");
     }
   };
@@ -195,10 +205,10 @@ export default function CreatorManager() {
                 >
                   <div className="flex justify-between items-start mb-4">
                     <div className="flex items-center gap-3">
-                      <img src={getValidAvatar(r.avatar)} className="w-12 h-12 rounded-xl object-cover" alt="" />
+                      <img src={getValidAvatar(r.userAvatar)} className="w-12 h-12 rounded-xl object-cover" alt="" />
                       <div>
                         <div className="flex items-center gap-2">
-                          <h3 className="font-black text-sm uppercase tracking-tight">{r.displayName}</h3>
+                          <h3 className="font-black text-sm uppercase tracking-tight">{r.userDisplayName}</h3>
                           {(r.userRole === 'MODERATOR' || r.userRole === 'MOD') && (
                             <span className="px-2 py-0.5 bg-amber-500/10 text-amber-500 border border-amber-500/20 text-[9px] font-black rounded-full uppercase tracking-wider">
                               Moderator
@@ -206,12 +216,12 @@ export default function CreatorManager() {
                           )}
                         </div>
                         <p className="text-[10px] text-neutral-500 font-bold uppercase tracking-widest font-mono">
-                          {r.email ? r.email.replace(/(.{2})(.*)(@.*)/, '$1••••••$3') : ''}
+                          {r.userEmail ? r.userEmail.replace(/(.{2})(.*)(@.*)/, '$1••••••$3') : ''}
                         </p>
                       </div>
                     </div>
                     <span className="text-[10px] text-neutral-400 font-medium">
-                      {r.createdAt?.toDate ? r.createdAt.toDate().toLocaleDateString('vi-VN') : '---'}
+                      {new Date(r.createdAt).toLocaleDateString('vi-VN')}
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-neutral-400">
