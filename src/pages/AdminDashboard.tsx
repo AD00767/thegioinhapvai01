@@ -3,14 +3,11 @@ import AdminLayout from './admin/AdminLayout';
 import { 
   Sparkles, FileText, MessageSquare, Trash2, Eye, EyeOff, Search, User, ExternalLink
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc,
-  orderBy, addDoc, where, getDoc, limit, documentId
-} from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../lib/supabase';
 import { getValidAvatar } from '../lib/avatar';
 import { useAuthStore } from '../store/useAuthStore';
-import { generateUniqueId } from '../lib/generateId';
+import { generateUniqueId } from '../lib/generateId'; // Note: Nếu hàm này dùng db firebase, ta sẽ giả lập lại bằng Supabase ở backend sau. Tạm thời vẫn giữ nguyên tên.
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import UserProfileModal from '../components/admin/UserProfileModal';
 import DisplayId from '../components/DisplayId';
@@ -52,15 +49,20 @@ export default function AdminDashboard() {
 
     const newMap: Record<string, any> = {};
     
-    // Batch in chunks of up to 30 with documentId() 'in'
+    // Batch in chunks of up to 30
     for (let i = 0; i < missingIds.length; i += 30) {
       const chunk = missingIds.slice(i, i + 30);
       try {
-        const q = query(collection(db, 'users'), where(documentId(), 'in', chunk));
-        const snap = await getDocs(q);
-        snap.docs.forEach(d => {
-          newMap[d.id] = { id: d.id, ...d.data() };
-        });
+        const { data } = await supabase
+          .from('users')
+          .select('*')
+          .in('id', chunk);
+
+        if (data) {
+          data.forEach(d => {
+            newMap[d.id] = { id: d.id, ...d };
+          });
+        }
       } catch (err) {
         console.warn(`Could not batch fetch users:`, err);
       }
@@ -75,69 +77,44 @@ export default function AdminDashboard() {
     setLoading(true);
     try {
       if (activeTab === 'characters') {
-        const q = query(collection(db, 'characters'), orderBy('createdAt', 'desc'), limit(50));
-        const snap = await getDocs(q);
-        const list = await Promise.all(snap.docs.map(async (d) => {
-          const data = d.data();
-          let numericId = data.numericId;
-          if (!numericId) {
-            numericId = await generateUniqueId(db, 'character', d.id);
-            try {
-              await updateDoc(doc(db, 'characters', d.id), { numericId });
-            } catch (e) {
-              console.warn("Failed to backfill character numericId:", e);
-            }
-          }
-          return { id: d.id, ...data, numericId };
-        }));
-        setCharacters(list);
-
-        const ownerIds = list.map((c: any) => c.creatorId || c.userId || c.authorId);
-        await fetchOwnerUsers(ownerIds);
+        const { data: chars } = await supabase
+          .from('characters')
+          .select('*')
+          .order('createdAt', { ascending: false })
+          .limit(50);
+          
+        if (chars) {
+          setCharacters(chars);
+          const ownerIds = chars.map((c: any) => c.creatorId || c.userId || c.authorId);
+          await fetchOwnerUsers(ownerIds);
+        }
 
       } else if (activeTab === 'prompts') {
-        const q = query(collection(db, 'prompts'), orderBy('createdAt', 'desc'), limit(50));
-        const snap = await getDocs(q);
-        const list = await Promise.all(snap.docs.map(async (d) => {
-          const data = d.data();
-          let numericId = data.numericId;
-          if (!numericId) {
-            numericId = await generateUniqueId(db, 'prompt', d.id);
-            try {
-              await updateDoc(doc(db, 'prompts', d.id), { numericId });
-            } catch (e) {
-              console.warn("Failed to backfill prompt numericId:", e);
-            }
-          }
-          return { id: d.id, ...data, numericId };
-        }));
-        setPrompts(list);
-
-        const ownerIds = list.map((p: any) => p.authorId || p.userId || p.creatorId);
-        await fetchOwnerUsers(ownerIds);
+        const { data: promptList } = await supabase
+          .from('prompts')
+          .select('*')
+          .order('createdAt', { ascending: false })
+          .limit(50);
+          
+        if (promptList) {
+          setPrompts(promptList);
+          const ownerIds = promptList.map((p: any) => p.authorId || p.userId || p.creatorId);
+          await fetchOwnerUsers(ownerIds);
+        }
 
       } else if (activeTab === 'feedbacks') {
-        const q = query(collection(db, 'feedbacks'), where('mode', '==', 'PUBLIC'), limit(50));
-        const snap = await getDocs(q);
-        const list = await Promise.all(snap.docs.map(async (d) => {
-          const data = d.data();
-          let numericId = data.numericId;
-          if (!numericId) {
-            numericId = await generateUniqueId(db, 'feedback', d.id);
-            try {
-              await updateDoc(doc(db, 'feedbacks', d.id), { numericId });
-            } catch (e) {
-              console.warn("Failed to backfill feedback numericId:", e);
-            }
-          }
-          return { id: d.id, ...data, numericId };
-        }));
-        
-        list.sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-        setFeedbacks(list);
-
-        const ownerIds = list.map((f: any) => f.senderId || f.userId);
-        await fetchOwnerUsers(ownerIds);
+        const { data: fbList } = await supabase
+          .from('feedbacks')
+          .select('*')
+          .eq('mode', 'PUBLIC')
+          .order('createdAt', { ascending: false })
+          .limit(50);
+          
+        if (fbList) {
+          setFeedbacks(fbList);
+          const ownerIds = fbList.map((f: any) => f.senderId || f.userId);
+          await fetchOwnerUsers(ownerIds);
+        }
       }
     } catch (err) {
       console.error("Fetch error:", err);
@@ -150,7 +127,7 @@ export default function AdminDashboard() {
   const logAction = async (action: string, targetId: string, details: string) => {
     try {
       if (!currentUser) return;
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName,
         executorRole: currentUser.role,
@@ -181,17 +158,15 @@ export default function AdminDashboard() {
 
     try {
       const now = new Date().toISOString();
-      const targetRef = doc(db, collectionName, id);
 
       let ownerId = actionItem.ownerId;
       let targetName = actionItem.name || 'Nội dung';
 
       if (!ownerId || !targetName) {
-        const snap = await getDoc(targetRef);
-        if (snap.exists()) {
-          const d = snap.data();
-          ownerId = ownerId || d.creatorId || d.userId || d.senderId || d.authorId;
-          targetName = targetName || d.name || d.title || d.message || 'Nội dung';
+        const { data: snap } = await supabase.from(collectionName).select('*').eq('id', id).single();
+        if (snap) {
+          ownerId = ownerId || snap.creatorId || snap.userId || snap.senderId || snap.authorId;
+          targetName = targetName || snap.name || snap.title || snap.message || 'Nội dung';
         }
       }
 
@@ -206,7 +181,7 @@ export default function AdminDashboard() {
       if (type === 'DELETE' || type === 'HIDE') {
         const actionLabel = type === 'DELETE' ? 'gỡ bỏ' : 'tạm ẩn';
 
-        await updateDoc(targetRef, {
+        await supabase.from(collectionName).update({
           isHidden: true,
           deletedAt: now,
           deletedBy: currentUser?.id || 'admin',
@@ -214,10 +189,10 @@ export default function AdminDashboard() {
           removalDetails: details || reason,
           removalTime: now,
           appealStatus: 'NONE'
-        });
+        }).eq('id', id);
 
         if (ownerId && ownerId !== currentUser?.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: ownerId,
             recipientId: ownerId,
             type: 'CONTENT_REMOVED',
@@ -243,14 +218,14 @@ export default function AdminDashboard() {
         toast.success(`Đã ${actionLabel} nội dung thành công.`);
 
       } else if (type === 'RESTORE') {
-        await updateDoc(targetRef, {
+        await supabase.from(collectionName).update({
           isHidden: false,
           deletedAt: null,
           appealStatus: 'APPROVED'
-        });
+        }).eq('id', id);
 
         if (ownerId && ownerId !== currentUser?.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: ownerId,
             recipientId: ownerId,
             type: 'SYSTEM',
