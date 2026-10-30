@@ -4,8 +4,8 @@ import {
   Sparkles, UserCheck, UserPlus, Users, BookOpen, PenTool, ArrowLeft, Flag, AlertCircle, RefreshCw,
   Facebook, Instagram, Music, MessageSquare, Share2, MoreVertical
 } from 'lucide-react';
-import { doc, getDoc, collection, query, where, getDocs, addDoc, deleteDoc, serverTimestamp, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { CreatorItem, CharacterItem, PromptItem } from '../types';
 import { useSeo } from '../hooks/useSeo';
@@ -76,36 +76,43 @@ export default function CreatorDetail() {
     setError(false);
 
     try {
-      let userSnap;
+      let userData = null;
       let targetDocId = id;
       const isNumeric = /^[0-9]{9}$/.test(id);
 
-      // Try numericId lookup first if param is 9 digits
+      // Try numericId lookup first if param is 9 digits using Supabase
       if (isNumeric) {
-        const q = query(collection(db, 'users'), where('numericId', '==', id), limit(1));
-        const querySnap = await getDocs(q);
-        if (!querySnap.empty) {
-          userSnap = querySnap.docs[0];
-          targetDocId = userSnap.id;
+        const { data } = await supabase
+          .from('users')
+          .select('*')
+          .eq('numericId', id)
+          .limit(1)
+          .single();
+          
+        if (data) {
+          userData = data;
+          targetDocId = data.id;
         }
       }
 
       // Fallback to direct document ID lookup
-      if (!userSnap) {
-        const userRef = doc(db, 'users', id);
-        const directSnap = await getDoc(userRef);
-        if (directSnap.exists()) {
-          userSnap = directSnap;
-          targetDocId = directSnap.id;
+      if (!userData) {
+        const { data } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', id)
+          .single();
+          
+        if (data) {
+          userData = data;
+          targetDocId = data.id;
         }
       }
 
-      if (!userSnap) {
+      if (!userData) {
         setError(true);
         return;
       }
-
-      const userData = userSnap.data();
 
       // Check deleted or locked or hidden state
       if (userData.deletedAt || userData.isHidden || userData.isLocked || userData.isDeleted || userData.status === 'DELETED') {
@@ -129,23 +136,26 @@ export default function CreatorDetail() {
       document.title = `${cItem.displayName} - Creator Profile | Thế giới nhập vai_AD`;
 
       // Fetch Creator's characters
-      const qChar = query(collection(db, 'characters'), where('creatorId', '==', targetDocId));
-      const snapChar = await getDocs(qChar);
+      const { data: charData } = await supabase
+        .from('characters')
+        .select('*')
+        .eq('creatorId', targetDocId)
+        .is('deletedAt', null)
+        .is('isHidden', false);
+
       const charList: CharacterItem[] = [];
       let totalLikesReceived = 0;
       let totalSavesReceived = 0;
       let totalViewsReceived = 0;
 
-      snapChar.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt && !data.isHidden) {
-          const item = { id: d.id, ...data } as CharacterItem;
-          charList.push(item);
+      if (charData) {
+        charData.forEach((data: any) => {
+          charList.push(data as CharacterItem);
           totalLikesReceived += Number(data.likesCount || 0);
           totalSavesReceived += Number(data.savesCount || 0);
           totalViewsReceived += Number(data.viewsCount || 0);
-        }
-      });
+        });
+      }
 
       // Sort pinned first, then newest
       charList.sort((a, b) => {
@@ -167,13 +177,14 @@ export default function CreatorDetail() {
       } : null);
 
       // Fetch Creator's prompts
-      const qPrompt = query(collection(db, 'prompts'), where('authorId', '==', targetDocId));
-      const snapPrompt = await getDocs(qPrompt);
-      const promptList: PromptItem[] = [];
-      snapPrompt.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt && !data.isHidden) promptList.push({ id: d.id, ...data } as PromptItem);
-      });
+      const { data: promptData } = await supabase
+        .from('prompts')
+        .select('*')
+        .eq('authorId', targetDocId)
+        .is('deletedAt', null)
+        .is('isHidden', false);
+
+      const promptList: PromptItem[] = promptData ? (promptData as PromptItem[]) : [];
 
       promptList.sort((a, b) => {
         if (a.pinned && !b.pinned) return -1;
