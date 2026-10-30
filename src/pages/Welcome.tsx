@@ -5,7 +5,8 @@ import { WifiOff, RefreshCw, ArrowLeft, Mail, Lock, UserPlus, AlertCircle, Compa
 import { motion } from "motion/react";
 import { useSeo } from "../hooks/useSeo";
 import ThemeToggle from "../components/ThemeToggle";
-import { loginWithGoogle, loginWithEmail, registerWithEmail } from "../lib/firebase";
+// Xóa import firebase, thay bằng supabase
+import { supabase } from "../lib/supabase";
 import toast from "react-hot-toast";
 
 interface WelcomeProps {
@@ -78,24 +79,27 @@ export default function Welcome({ onStart }: WelcomeProps) {
     resetAuthForm();
   };
 
+  // Đăng nhập bằng Google qua Supabase
   const handleGoogleAuth = async () => {
     setAuthLoading(true);
     setAuthError(null);
     try {
-      await loginWithGoogle();
-      toast.success("Đăng nhập bằng Google thành công!");
-      sessionStorage.setItem('has_entered_app', 'true');
-      window.dispatchEvent(new Event('app-entered-changed'));
-      if (onStart) onStart();
-      else navigate('/');
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) throw error;
+      // Trình duyệt sẽ tự chuyển hướng sang trang đăng nhập của Google
     } catch (err: any) {
       console.error(err);
       setAuthError(err.message || "Không thể đăng nhập bằng Google. Vui lòng thử lại.");
-    } finally {
       setAuthLoading(false);
     }
   };
 
+  // Đăng nhập bằng Email qua Supabase
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
@@ -107,19 +111,26 @@ export default function Welcome({ onStart }: WelcomeProps) {
 
     setAuthLoading(true);
     try {
-      await loginWithEmail(email.trim(), password);
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password: password,
+      });
+
+      if (error) throw error;
+
       toast.success("Đăng nhập thành công!");
       sessionStorage.setItem('has_entered_app', 'true');
       window.dispatchEvent(new Event('app-entered-changed'));
       if (onStart) onStart();
       else navigate('/');
     } catch (err: any) {
-      setAuthError(err.message || "Đăng nhập thất bại.");
+      setAuthError(err.message || "Đăng nhập thất bại. Vui lòng kiểm tra lại thông tin.");
     } finally {
       setAuthLoading(false);
     }
   };
 
+  // Đăng ký bằng Email qua Supabase
   const handleEmailRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
@@ -148,8 +159,14 @@ export default function Welcome({ onStart }: WelcomeProps) {
 
     setAuthLoading(true);
     try {
-      await registerWithEmail(cleanEmail, password);
-      toast.success("Đăng ký tài khoản thành công!");
+      const { error } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password: password,
+      });
+
+      if (error) throw error;
+
+      toast.success("Đăng ký thành công! Bạn có thể đăng nhập ngay bây giờ.");
       sessionStorage.setItem('has_entered_app', 'true');
       window.dispatchEvent(new Event('app-entered-changed'));
       if (onStart) onStart();
