@@ -5,11 +5,8 @@ import {
   Search, X, MoreVertical, ShieldAlert,
   AlertCircle, Key
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, 
-  orderBy, where, serverTimestamp, addDoc 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { getValidAvatar } from '../../lib/avatar';
 import toast from 'react-hot-toast';
@@ -31,28 +28,31 @@ export default function AdminModeratorManager() {
   const fetchManagers = async () => {
     setLoading(true);
     try {
-      const q = query(
-        collection(db, 'users'), 
-        where('role', 'in', ['ADMIN', 'MODERATOR']),
-        orderBy('createdAt', 'desc')
-      );
-      const qInvites = query(
-        collection(db, 'users'),
-        where('moderatorInviteStatus', '==', 'PENDING')
-      );
-      
-      const [snap, snapInvites] = await Promise.all([
-        getDocs(q),
-        getDocs(qInvites)
-      ]);
+      // Get ADMINs and MODERATORs
+      const { data: staffData } = await supabase
+        .from('users')
+        .select('*')
+        .in('role', ['ADMIN', 'MODERATOR']);
+        
+      // Get pending invites
+      const { data: inviteData } = await supabase
+        .from('users')
+        .select('*')
+        .eq('moderatorInviteStatus', 'PENDING');
 
       const map = new Map<string, any>();
-      snap.docs.forEach(d => map.set(d.id, { id: d.id, ...d.data() }));
-      snapInvites.docs.forEach(d => map.set(d.id, { id: d.id, ...d.data() }));
+      
+      if (staffData) {
+        staffData.forEach(d => map.set(d.id, d));
+      }
+      
+      if (inviteData) {
+        inviteData.forEach(d => map.set(d.id, d));
+      }
 
       const list = Array.from(map.values()).sort((a, b) => {
-        const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt || 0).getTime();
-        const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt || 0).getTime();
+        const timeA = new Date(a.createdAt || 0).getTime();
+        const timeB = new Date(b.createdAt || 0).getTime();
         return timeB - timeA;
       });
 
@@ -68,13 +68,18 @@ export default function AdminModeratorManager() {
     if (!searchEmail.trim()) return;
     setLoading(true);
     try {
-      const q = query(collection(db, 'users'), where('email', '==', searchEmail.trim()));
-      const snap = await getDocs(q);
-      if (snap.empty) {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', searchEmail.trim())
+        .limit(1)
+        .single();
+        
+      if (!data) {
         toast.error("Không tìm thấy người dùng.");
         setFoundUser(null);
       } else {
-        setFoundUser({ id: snap.docs[0].id, ...snap.docs[0].data() });
+        setFoundUser(data);
       }
     } catch (err) {
       toast.error("Lỗi khi tìm kiếm.");
@@ -90,24 +95,26 @@ export default function AdminModeratorManager() {
     }
     
     try {
+      const timestamp = new Date().toISOString();
+
       if (newRole === 'MODERATOR') {
         // Invite instead of immediate promote
-        await updateDoc(doc(db, 'users', userId), {
+        await supabase.from('users').update({
           moderatorInviteStatus: 'PENDING',
-          updatedAt: serverTimestamp()
-        });
+          updatedAt: timestamp
+        }).eq('id', userId);
 
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           userId: userId,
           recipientId: userId,
           type: 'MODERATOR_INVITE',
           title: 'Lời mời làm Moderator',
           message: `Quản trị viên ${currentUser?.displayName || 'Admin'} đã gửi lời mời bạn trở thành Moderator của hệ thống.`,
           read: false,
-          createdAt: new Date().toISOString()
+          createdAt: timestamp
         });
 
-        await addDoc(collection(db, 'audit_logs'), {
+        await supabase.from('audit_logs').insert({
           executorId: currentUser.id,
           executorName: currentUser.displayName,
           executorRole: currentUser.role,
@@ -115,7 +122,7 @@ export default function AdminModeratorManager() {
           targetId: userId,
           targetType: 'USER',
           details: `Gửi lời mời làm Moderator cho ${userId}`,
-          createdAt: new Date().toISOString()
+          createdAt: timestamp
         });
 
         toast.success("Đã gửi lời mời làm Moderator!");
@@ -126,15 +133,14 @@ export default function AdminModeratorManager() {
         return;
       }
 
-      await updateDoc(doc(db, 'users', userId), {
+      await supabase.from('users').update({
         role: newRole,
         permissions: newRole === 'ADMIN' ? ['ALL'] : ['MANAGE_REPORTS', 'MANAGE_CONTENT', 'MANAGE_USERS'],
-        updatedAt: serverTimestamp(),
-        // Clear invite status if demoted or promoted to Admin
+        updatedAt: timestamp,
         moderatorInviteStatus: null
-      });
+      }).eq('id', userId);
 
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName,
         executorRole: currentUser.role,
@@ -142,7 +148,7 @@ export default function AdminModeratorManager() {
         targetId: userId,
         targetType: 'USER',
         details: `Cập nhật vai trò quản trị cho ${userId} thành ${newRole}`,
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
       toast.success(`Đã cập nhật thành ${newRole}`);
