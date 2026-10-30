@@ -6,15 +6,15 @@ import {
   Sun, Moon, Laptop, Search
 } from "lucide-react";
 import { useAuthStore } from "../../store/useAuthStore";
-import { loginWithGoogle, logout, db } from "../../lib/firebase";
-import { collection, query, where, onSnapshot, doc, updateDoc, getDocs, limit } from "firebase/firestore";
+// Sử dụng Supabase thay thế hoàn toàn Firebase
+import { supabase } from "../../lib/supabase";
 import toast from "react-hot-toast";
 import clsx from "clsx";
 import CaptchaModal from "../CaptchaModal";
 import AuthModal from "../auth/AuthModal";
 import ThemeToggle from "../ThemeToggle";
 import { applyTheme, ThemeMode } from "../../lib/themeFont";
-import { parseIdQuery, lookupIdInFirebase } from "../../lib/searchUtils";
+import { parseIdQuery, lookupIdInFirebase } from "../../lib/searchUtils"; // Có thể đổi tên sau, tạm giữ nguyên để tránh lỗi import
 import { getValidAvatar } from "../../lib/avatar";
 
 interface LayoutProps {
@@ -22,7 +22,7 @@ interface LayoutProps {
 }
 
 export default function Layout({ children }: LayoutProps) {
-  const { user, isInitialized } = useAuthStore();
+  const { user, isInitialized, setAuth } = useAuthStore();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [isCaptchaOpen, setIsCaptchaOpen] = useState(false);
@@ -98,9 +98,12 @@ export default function Layout({ children }: LayoutProps) {
     );
     if (user?.id) {
       try {
-        await updateDoc(doc(db, 'users', user.id), { themePreference: mode });
+        await supabase
+          .from('users')
+          .update({ themePreference: mode })
+          .eq('id', user.id);
       } catch (e) {
-        console.error("Error saving theme preference to Firestore:", e);
+        console.error("Error saving theme preference to Supabase:", e);
       }
     }
   };
@@ -115,45 +118,38 @@ export default function Layout({ children }: LayoutProps) {
       return;
     }
 
-    const qRecipient = query(
-      collection(db, 'notifications'),
-      where('recipientId', '==', user.id),
-      where('read', '==', false),
-      limit(20)
-    );
-
-    const qUser = query(
-      collection(db, 'notifications'),
-      where('userId', '==', user.id),
-      where('read', '==', false),
-      limit(20)
-    );
-
-    let unreadRecipientIds = new Set<string>();
-    let unreadUserIds = new Set<string>();
-
-    const updateCount = () => {
-      const combined = new Set([...unreadRecipientIds, ...unreadUserIds]);
-      setUnreadNotifCount(combined.size);
+    const fetchInitialUnreadCount = async () => {
+      try {
+        const { data } = await supabase
+          .from('notifications')
+          .select('id')
+          .eq('read', false)
+          .or(`recipientId.eq.${user.id},userId.eq.${user.id}`);
+          
+        if (data) {
+          setUnreadNotifCount(data.length);
+        }
+      } catch (err) {
+        console.error("Lỗi đếm thông báo:", err);
+      }
     };
+    
+    fetchInitialUnreadCount();
 
-    const unsubRecipient = onSnapshot(qRecipient, (snapshot) => {
-      unreadRecipientIds = new Set(snapshot.docs.map(doc => doc.id));
-      updateCount();
-    }, (err) => {
-      console.error("Recipient notifications listener error:", err);
-    });
-
-    const unsubUser = onSnapshot(qUser, (snapshot) => {
-      unreadUserIds = new Set(snapshot.docs.map(doc => doc.id));
-      updateCount();
-    }, (err) => {
-      console.error("User notifications listener error:", err);
-    });
+    // Supabase Realtime Subscription for Notifications
+    const notifSubscription = supabase
+      .channel('public:notifications')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'notifications' }, 
+        (payload) => {
+          // Re-fetch count when there's any change
+          fetchInitialUnreadCount();
+        }
+      )
+      .subscribe();
 
     return () => {
-      unsubRecipient();
-      unsubUser();
+      supabase.removeChannel(notifSubscription);
     };
   }, [user?.id]);
 
@@ -165,20 +161,32 @@ export default function Layout({ children }: LayoutProps) {
 
   const handleCaptchaSuccess = async () => {
     try {
-      await loginWithGoogle();
-      toast.success("Đăng nhập thành công!");
+      // Đăng nhập bằng Google thông qua Supabase Auth
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) throw error;
+      
     } catch (err) {
+      console.error(err);
       toast.error("Đăng nhập thất bại.");
     }
   };
 
   const handleLogout = async () => {
-    await logout();
-    sessionStorage.removeItem('has_entered_app');
-    window.dispatchEvent(new Event('app-entered-changed'));
-    useAuthStore.getState().setAuth(null, null);
-    toast.success("Đã đăng xuất.");
-    navigate('/welcome');
+    try {
+      await supabase.auth.signOut();
+      sessionStorage.removeItem('has_entered_app');
+      window.dispatchEvent(new Event('app-entered-changed'));
+      setAuth(null, null);
+      toast.success("Đã đăng xuất.");
+      navigate('/welcome');
+    } catch (err) {
+      toast.error("Đăng xuất thất bại.");
+    }
   };
 
   const menuItems = [
