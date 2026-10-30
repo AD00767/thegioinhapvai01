@@ -3,8 +3,8 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   Copy, Check, Bookmark, BookmarkCheck, ArrowLeft, Flag, AlertCircle, Eye, MessageSquare, Sparkles, Trash2, Edit3, Link as LinkIcon, Image as ImageIcon, FileText, ExternalLink, Share2, ShieldAlert 
 } from 'lucide-react';
-import { doc, getDoc, updateDoc, increment, collection, addDoc, query, where, getDocs, deleteDoc, serverTimestamp, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useUserInteractions } from '../context/UserInteractionsContext';
 import { PromptItem } from '../types';
@@ -54,34 +54,42 @@ export default function PromptDetail() {
     setError(false);
 
     try {
-      let snap;
+      let data = null;
       let docId = id;
       const isNumeric = /^[0-9]{9}$/.test(id);
 
       if (isNumeric) {
-        const q = query(collection(db, 'prompts'), where('numericId', '==', id), limit(1));
-        const querySnap = await getDocs(q);
-        if (!querySnap.empty) {
-          snap = querySnap.docs[0];
-          docId = snap.id;
+        const { data: numData } = await supabase
+          .from('prompts')
+          .select('*')
+          .eq('numericId', id)
+          .limit(1)
+          .single();
+          
+        if (numData) {
+          data = numData;
+          docId = numData.id;
         }
       }
 
-      if (!snap) {
-        const docRef = doc(db, 'prompts', id);
-        const directSnap = await getDoc(docRef);
-        if (directSnap.exists()) {
-          snap = directSnap;
-          docId = directSnap.id;
+      if (!data) {
+        const { data: directData } = await supabase
+          .from('prompts')
+          .select('*')
+          .eq('id', id)
+          .single();
+          
+        if (directData) {
+          data = directData;
+          docId = directData.id;
         }
       }
 
-      if (!snap || !snap.exists()) {
+      if (!data) {
         setError(true);
         return;
       }
 
-      const data = snap.data();
       const isStaffOrAuthor = Boolean(
         user && (
           user.id === data.authorId ||
@@ -108,13 +116,12 @@ export default function PromptDetail() {
         const now = Date.now();
         const throttleTime = 5 * 60 * 1000; // 5 minutes
 
-        const targetDocRef = doc(db, 'prompts', docId);
-
         if (!lastViewed || (now - parseInt(lastViewed, 10)) > throttleTime) {
-          setViewsCount((item.viewsCount || 0) + 1);
+          const newViewsCount = (item.viewsCount || 0) + 1;
+          setViewsCount(newViewsCount);
           localStorage.setItem(storageKey, now.toString());
           try {
-            await updateDoc(targetDocRef, { viewsCount: increment(1) });
+            await supabase.from('prompts').update({ viewsCount: newViewsCount }).eq('id', docId);
           } catch (e) {
             console.error("View count update error:", e);
           }
@@ -156,9 +163,9 @@ export default function PromptDetail() {
       setCopied(true);
       toast.success("Đã sao chép Prompt vào khay nhớ tạm!");
 
-      const promptRef = doc(db, 'prompts', prompt.id);
-      await updateDoc(promptRef, { copyCount: increment(1) });
-      setCopyCount(prev => prev + 1);
+      const newCopyCount = copyCount + 1;
+      await supabase.from('prompts').update({ copyCount: newCopyCount }).eq('id', prompt.id);
+      setCopyCount(newCopyCount);
 
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -175,33 +182,37 @@ export default function PromptDetail() {
     if (!prompt) return;
 
     try {
-      const q = query(
-        collection(db, 'bookmarks'),
-        where('userId', '==', user.id),
-        where('targetId', '==', prompt.id),
-        where('targetType', '==', 'PROMPT')
-      );
-      const snap = await getDocs(q);
-      const promptRef = doc(db, 'prompts', prompt.id);
+      const { data: snap } = await supabase
+        .from('bookmarks')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('targetId', prompt.id)
+        .eq('targetType', 'PROMPT');
 
-      if (!snap.empty) {
-        for (const bDoc of snap.docs) {
-          await deleteDoc(doc(db, 'bookmarks', bDoc.id));
+      if (snap && snap.length > 0) {
+        for (const bDoc of snap) {
+          await supabase.from('bookmarks').delete().eq('id', bDoc.id);
         }
-        await updateDoc(promptRef, { savesCount: increment(-1) });
+        const newSavesCount = Math.max(0, savesCount - 1);
+        await supabase.from('prompts').update({ savesCount: newSavesCount }).eq('id', prompt.id);
+        
         setIsBookmarked(false);
-        setSavesCount(prev => Math.max(0, prev - 1));
+        setSavesCount(newSavesCount);
+        setBookmarkState('PROMPT', prompt.id, false);
         toast.success("Đã bỏ lưu Prompt.");
       } else {
-        await addDoc(collection(db, 'bookmarks'), {
+        await supabase.from('bookmarks').insert({
           userId: user.id,
           targetId: prompt.id,
           targetType: 'PROMPT',
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
-        await updateDoc(promptRef, { savesCount: increment(1) });
+        const newSavesCount = savesCount + 1;
+        await supabase.from('prompts').update({ savesCount: newSavesCount }).eq('id', prompt.id);
+        
         setIsBookmarked(true);
-        setSavesCount(prev => prev + 1);
+        setSavesCount(newSavesCount);
+        setBookmarkState('PROMPT', prompt.id, true);
         toast.success("Đã lưu Prompt vào bộ sưu tập!");
       }
     } catch (err) {
@@ -220,60 +231,64 @@ export default function PromptDetail() {
     setIsDeleteConfirmOpen(true);
   };
 
-  const executeDeletePrompt = async (reason?: string, details?: string) => {
+  const executeDeletePromptLocal = async (reason?: string, details?: string) => {
     if (!prompt) return;
 
     setIsDeleting(true);
     try {
+      const timestamp = new Date().toISOString();
+      
       if (isStaff && !isOwner) {
         // Staff/Admin removal: soft delete with reason, log audit, notify author
         const removalReason = reason || "Vi phạm tiêu chuẩn cộng đồng";
         const removalDetails = details || "";
 
-        await updateDoc(doc(db, 'prompts', prompt.id), {
+        await supabase.from('prompts').update({
           isHidden: true,
-          deletedAt: new Date().toISOString(),
+          deletedAt: timestamp,
           deletedBy: user?.id || 'admin',
           removalReason,
           removalDetails,
-          removalTime: new Date().toISOString(),
+          removalTime: timestamp,
           appealStatus: 'NONE'
-        });
+        }).eq('id', prompt.id);
 
         // Create notification for author
         if (prompt.authorId && prompt.authorId !== user?.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: prompt.authorId,
+            recipientId: prompt.authorId, // Cho đồng bộ format nhận
             type: 'CONTENT_REMOVED',
             title: 'Prompt của bạn đã bị gỡ bỏ',
-            content: `Prompt "${prompt.name || prompt.title}" đã bị gỡ bỏ do: ${removalReason}.`,
+            message: `Prompt "${prompt.name || prompt.title}" đã bị gỡ bỏ do: ${removalReason}.`, // Đổi content thành message
             targetType: 'PROMPT',
             targetId: prompt.id,
             targetName: prompt.name || prompt.title,
             removalReason,
             removalDetails,
             isRead: false,
-            createdAt: serverTimestamp()
+            read: false,
+            createdAt: timestamp
           });
         }
 
         // Add audit log
-        await addDoc(collection(db, 'activity_logs'), {
+        await supabase.from('activity_logs').insert({
           userId: user?.id,
           userName: user?.displayName || 'Admin/Mod',
           action: 'REMOVE_PROMPT',
           details: `Gỡ bỏ Prompt "${prompt.name || prompt.title}" (ID: ${prompt.id}) - Lý do: ${removalReason}`,
-          timestamp: serverTimestamp()
+          timestamp: timestamp
         });
 
         toast.success("Đã gỡ bỏ Prompt và gửi thông báo tới tác giả.");
       } else {
         // Owner deletion: soft delete or complete delete
-        await updateDoc(doc(db, 'prompts', prompt.id), {
+        await supabase.from('prompts').update({
           isHidden: true,
-          deletedAt: new Date().toISOString(),
+          deletedAt: timestamp,
           deletedBy: user?.id || 'owner'
-        });
+        }).eq('id', prompt.id);
         toast.success("Đã xóa Prompt khỏi hệ thống!");
       }
 
@@ -440,7 +455,7 @@ export default function PromptDetail() {
               {prompt.referenceLinks.map((link, idx) => (
                 <a
                   key={idx}
-                  href={link}
+                  href={link.startsWith('http') ? link : `https://${link}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline bg-neutral-50 dark:bg-neutral-800/60 border border-neutral-200/80 dark:border-neutral-800 p-2.5 rounded-xl w-fit max-w-full truncate"
@@ -624,8 +639,8 @@ export default function PromptDetail() {
       <DeleteConfirmModal
         isOpen={isDeleteConfirmOpen}
         onClose={() => setIsDeleteConfirmOpen(false)}
-        onConfirm={executeDeletePrompt}
-        onConfirmWithReason={(r, d) => executeDeletePrompt(r, d)}
+        onConfirm={executeDeletePromptLocal}
+        onConfirmWithReason={(r, d) => executeDeletePromptLocal(r, d)}
         requireReason={!isOwner}
         title={!isOwner ? "Gỡ bỏ Prompt của thành viên?" : "Xóa Prompt?"}
         description={
