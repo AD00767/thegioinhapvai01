@@ -3,14 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { 
   Lock, Mail, CornerDownRight, Send, Trash2, Shield, Heart, ArrowRight, MessageSquare 
 } from 'lucide-react';
-import { doc, updateDoc, deleteDoc, collection, addDoc, getDocs, query, where, orderBy, serverTimestamp } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
-import { useAuthStore } from '../../store/useAuthStore';
-import UserBadge from '../UserBadge';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../lib/supabase';
+import { useAuthStore } from '../store/useAuthStore';
+import UserBadge from './UserBadge';
 import { FeedbackItem } from './PublicFeedbackCard';
-import { getValidAvatar, DEFAULT_AVATAR } from '../../lib/avatar';
-import { enforceActivityCheck } from '../../lib/restrictions';
-import DeleteConfirmModal from '../DeleteConfirmModal';
+import { getValidAvatar, DEFAULT_AVATAR } from '../lib/avatar';
+import { enforceActivityCheck } from '../lib/restrictions';
+import DeleteConfirmModal from './DeleteConfirmModal';
 import toast from 'react-hot-toast';
 
 interface PrivateReply {
@@ -45,9 +45,9 @@ export default function PrivateFeedbackCard({
   onDelete
 }: PrivateFeedbackCardProps) {
   const navigate = useNavigate();
-  const { user, firebaseUser } = useAuthStore();
+  const { user } = useAuthStore();
 
-  const currentUserId = user?.id || user?.uid || firebaseUser?.uid;
+  const currentUserId = user?.id;
   const isSender = Boolean(currentUserId && currentUserId === feedback.senderId);
   const isRecipient = Boolean(currentUserId && currentUserId === feedback.recipientId);
   const isAdmin = user?.role === 'ADMIN';
@@ -75,16 +75,14 @@ export default function PrivateFeedbackCard({
   const fetchReplies = async () => {
     setLoadingReplies(true);
     try {
-      const q = query(
-        collection(db, `feedbacks/${feedback.id}/private_replies`),
-        orderBy('createdAt', 'asc')
-      );
-      const snap = await getDocs(q);
-      const list: PrivateReply[] = [];
-      snap.docs.forEach(d => {
-        list.push({ id: d.id, ...d.data() } as PrivateReply);
-      });
-      setReplies(list);
+      const { data, error } = await supabase
+        .from('private_replies')
+        .select('*')
+        .eq('feedbackId', feedback.id)
+        .order('createdAt', { ascending: true });
+
+      if (error) throw error;
+      setReplies((data as PrivateReply[]) || []);
     } catch (err) {
       console.error("Lỗi khi tải phản hồi riêng tư:", err);
     } finally {
@@ -109,23 +107,23 @@ export default function PrivateFeedbackCard({
         updatedReactions[user.id] = reactionType;
       }
 
-      const fbRef = doc(db, 'feedbacks', feedback.id);
-      await updateDoc(fbRef, {
+      await supabase.from('feedbacks').update({
         reactions: updatedReactions,
         reactionsCount: Object.keys(updatedReactions).length
-      });
+      }).eq('id', feedback.id);
 
       // Notify the other party
       const notifyTargetId = isRecipient ? feedback.senderId : feedback.recipientId;
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
         userId: notifyTargetId,
+        recipientId: notifyTargetId,
         senderId: user.id,
         type: 'FEEDBACK',
         title: 'Cảm xúc mới trên Thư riêng tư',
         message: `${user.displayName} đã thả cảm xúc vào thư riêng tư của bạn.`,
         link: '/feedbacks',
         read: false,
-        createdAt: serverTimestamp()
+        createdAt: new Date().toISOString()
       });
 
       if (onUpdate) onUpdate();
@@ -134,7 +132,7 @@ export default function PrivateFeedbackCard({
     }
   };
 
-  // Recipient or Admin deletes letter (per Module 11 rules)
+  // Recipient or Admin deletes letter
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const handleDelete = async (reason?: string, details?: string) => {
@@ -151,8 +149,7 @@ export default function PrivateFeedbackCard({
         const removalReasonText = reason.trim();
         const removalDetailsText = details?.trim() || removalReasonText;
 
-        const fbRef = doc(db, 'feedbacks', feedback.id);
-        await updateDoc(fbRef, { 
+        await supabase.from('feedbacks').update({ 
           isHidden: true,
           deletedAt: now,
           deletedBy: user?.id || 'admin',
@@ -160,12 +157,12 @@ export default function PrivateFeedbackCard({
           removalDetails: removalDetailsText,
           removalTime: now,
           appealStatus: 'NONE'
-        });
+        }).eq('id', feedback.id);
 
         // Notify sender if deleted by admin
         if (feedback.senderId && feedback.senderId !== user?.id) {
           const targetName = feedback.title || feedback.content?.slice(0, 40) || 'Thư riêng tư';
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: feedback.senderId,
             recipientId: feedback.senderId,
             senderId: user?.id,
@@ -186,7 +183,7 @@ export default function PrivateFeedbackCard({
         }
 
         // Add audit log
-        await addDoc(collection(db, 'audit_logs'), {
+        await supabase.from('audit_logs').insert({
           executorId: user?.id,
           executorName: user?.displayName || 'Admin',
           executorRole: user?.role || 'ADMIN',
@@ -201,11 +198,10 @@ export default function PrivateFeedbackCard({
         toast.success("Đã gỡ bỏ thư riêng tư và gửi thông báo cho tác giả.");
       } else {
         // Recipient deletes received private feedback
-        const fbRef = doc(db, 'feedbacks', feedback.id);
-        await updateDoc(fbRef, { 
+        await supabase.from('feedbacks').update({ 
           deletedAt: now,
           deletedBy: user?.id
-        });
+        }).eq('id', feedback.id);
         toast.success("Đã xóa thư riêng tư thành công.");
       }
 
@@ -229,26 +225,27 @@ export default function PrivateFeedbackCard({
 
     setSubmittingReply(true);
     try {
-      await addDoc(collection(db, `feedbacks/${feedback.id}/private_replies`), {
+      await supabase.from('private_replies').insert({
         feedbackId: feedback.id,
         senderId: user.id,
         senderName: user.displayName,
         senderAvatar: getValidAvatar(user.avatar),
         content: replyText.trim(),
-        createdAt: serverTimestamp()
+        createdAt: new Date().toISOString()
       });
 
       // Notify recipient or sender
       const targetUserId = isRecipient ? feedback.senderId : feedback.recipientId;
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
         userId: targetUserId,
+        recipientId: targetUserId,
         senderId: user.id,
         type: 'FEEDBACK',
         title: 'Phản hồi mới cho Feedback riêng tư',
         message: `${user.displayName} đã trả lời thư riêng tư của bạn.`,
         link: '/feedbacks',
         read: false,
-        createdAt: serverTimestamp()
+        createdAt: new Date().toISOString()
       });
 
       setReplyText('');
@@ -365,7 +362,9 @@ export default function PrivateFeedbackCard({
 
       {/* Date */}
       <div className="text-[10px] text-neutral-400 font-medium">
-        Gửi lúc: {feedback.createdAt?.toDate ? feedback.createdAt.toDate().toLocaleString('vi-VN') : 'Mới đây'}
+        Gửi lúc: {feedback.createdAt?.toDate 
+          ? feedback.createdAt.toDate().toLocaleString('vi-VN') 
+          : (feedback.createdAt ? new Date(feedback.createdAt).toLocaleString('vi-VN') : 'Mới đây')}
       </div>
 
       {/* Actions Bar: Reaction & Reply */}
