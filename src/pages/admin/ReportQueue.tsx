@@ -6,11 +6,8 @@ import {
   MessageSquare, User, ShieldAlert, FileText, UserX,
   X, Mail, Calendar, BadgeCheck, Sparkles
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, updateDoc, 
-  orderBy, where, serverTimestamp, getDoc, addDoc 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import toast from 'react-hot-toast';
 import { ReportItem } from '../../types';
@@ -46,68 +43,68 @@ interface TargetContentInfo {
 async function fetchUserData(userId: string): Promise<UserDetail | null> {
   if (!userId) return null;
   try {
-    // 1. Try fetching directly by doc ID
-    const userRef = doc(db, 'users', userId);
-    const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      const d = userSnap.data();
-      const rawAvatar = d.avatar || d.photoURL || d.photoUrl || d.avatarUrl || '';
-      return {
-        id: userSnap.id,
-        numericId: d.numericId || userSnap.id.substring(0, 9),
-        displayName: d.displayName || d.name || 'Người dùng',
-        avatar: getValidAvatar(rawAvatar),
-        email: d.email || '',
-        role: d.role || 'USER',
-        creatorStatus: d.creatorStatus || false,
-        bio: d.bio || '',
-        createdAt: d.createdAt || '',
-        status: d.status || 'ACTIVE',
-        suspendedUntil: d.suspendedUntil || ''
-      };
+    let userData = null;
+    let docId = userId;
+    
+    // 1. Try querying by numericId (if it's exactly 9 digits)
+    const isNumeric = /^[0-9]{9}$/.test(userId);
+    if (isNumeric) {
+      const { data } = await supabase
+        .from('users')
+        .select('*')
+        .eq('numericId', userId)
+        .limit(1)
+        .single();
+      
+      if (data) {
+        userData = data;
+        docId = data.id;
+      }
     }
 
-    // 2. Try querying by numericId
-    const q = query(collection(db, 'users'), where('numericId', '==', userId));
-    const qSnap = await getDocs(q);
-    if (!qSnap.empty) {
-      const docItem = qSnap.docs[0];
-      const d = docItem.data();
-      const rawAvatar = d.avatar || d.photoURL || d.photoUrl || d.avatarUrl || '';
-      return {
-        id: docItem.id,
-        numericId: d.numericId || docItem.id.substring(0, 9),
-        displayName: d.displayName || d.name || 'Người dùng',
-        avatar: getValidAvatar(rawAvatar),
-        email: d.email || '',
-        role: d.role || 'USER',
-        creatorStatus: d.creatorStatus || false,
-        bio: d.bio || '',
-        createdAt: d.createdAt || '',
-        status: d.status || 'ACTIVE',
-        suspendedUntil: d.suspendedUntil || ''
-      };
+    // 2. Try fetching directly by doc ID (UUID) if not found by numericId
+    if (!userData) {
+      const { data } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+        
+      if (data) {
+        userData = data;
+        docId = data.id;
+      }
+    }
+    
+    // 3. Try fetching by uid if still not found (Legacy Support)
+    if (!userData) {
+      const { data } = await supabase
+        .from('users')
+        .select('*')
+        .eq('uid', userId)
+        .limit(1)
+        .single();
+        
+      if (data) {
+        userData = data;
+        docId = data.id;
+      }
     }
 
-    // 3. Try querying by uid
-    const qUid = query(collection(db, 'users'), where('uid', '==', userId));
-    const uidSnap = await getDocs(qUid);
-    if (!uidSnap.empty) {
-      const docItem = uidSnap.docs[0];
-      const d = docItem.data();
-      const rawAvatar = d.avatar || d.photoURL || d.photoUrl || d.avatarUrl || '';
+    if (userData) {
+      const rawAvatar = userData.avatar || userData.photoURL || userData.photoUrl || userData.avatarUrl || '';
       return {
-        id: docItem.id,
-        numericId: d.numericId || docItem.id.substring(0, 9),
-        displayName: d.displayName || d.name || 'Người dùng',
+        id: docId,
+        numericId: userData.numericId || docId.substring(0, 9),
+        displayName: userData.displayName || userData.name || 'Người dùng',
         avatar: getValidAvatar(rawAvatar),
-        email: d.email || '',
-        role: d.role || 'USER',
-        creatorStatus: d.creatorStatus || false,
-        bio: d.bio || '',
-        createdAt: d.createdAt || '',
-        status: d.status || 'ACTIVE',
-        suspendedUntil: d.suspendedUntil || ''
+        email: userData.email || '',
+        role: userData.role || 'USER',
+        creatorStatus: userData.creatorStatus || false,
+        bio: userData.bio || '',
+        createdAt: userData.createdAt || '',
+        status: userData.status || 'ACTIVE',
+        suspendedUntil: userData.suspendedUntil || ''
       };
     }
   } catch (e) {
@@ -176,12 +173,11 @@ export default function ReportQueue() {
             name: selectedReport.targetName || 'Creator'
           };
         } else if (selectedReport.targetType === 'CHARACTER') {
-          const charSnap = await getDoc(doc(db, 'characters', selectedReport.targetId));
-          if (charSnap.exists()) {
-            const d = charSnap.data();
+          const { data: d } = await supabase.from('characters').select('*').eq('id', selectedReport.targetId).single();
+          if (d) {
             reportedUserId = d.creatorId || d.userId;
             contentInfo = {
-              id: charSnap.id,
+              id: d.id,
               numericId: d.numericId,
               name: d.name,
               slogan: d.slogan,
@@ -191,12 +187,11 @@ export default function ReportQueue() {
             contentInfo = { id: selectedReport.targetId, name: selectedReport.targetName || 'Character' };
           }
         } else if (selectedReport.targetType === 'PROMPT') {
-          const promptSnap = await getDoc(doc(db, 'prompts', selectedReport.targetId));
-          if (promptSnap.exists()) {
-            const d = promptSnap.data();
+          const { data: d } = await supabase.from('prompts').select('*').eq('id', selectedReport.targetId).single();
+          if (d) {
             reportedUserId = d.authorId || d.userId || d.creatorId;
             contentInfo = {
-              id: promptSnap.id,
+              id: d.id,
               numericId: d.numericId,
               name: d.name,
               content: d.content || d.purpose,
@@ -206,12 +201,11 @@ export default function ReportQueue() {
             contentInfo = { id: selectedReport.targetId, name: selectedReport.targetName || 'Prompt' };
           }
         } else if (selectedReport.targetType === 'FEEDBACK') {
-          const fbSnap = await getDoc(doc(db, 'feedbacks', selectedReport.targetId));
-          if (fbSnap.exists()) {
-            const d = fbSnap.data();
+          const { data: d } = await supabase.from('feedbacks').select('*').eq('id', selectedReport.targetId).single();
+          if (d) {
             reportedUserId = d.senderId || d.authorId || d.userId;
             contentInfo = {
-              id: fbSnap.id,
+              id: d.id,
               name: d.title || 'Feedback',
               content: d.content,
               authorId: reportedUserId || undefined
@@ -220,12 +214,11 @@ export default function ReportQueue() {
             contentInfo = { id: selectedReport.targetId, name: selectedReport.targetName || 'Feedback' };
           }
         } else if (selectedReport.targetType === 'COMMENT') {
-          const commentSnap = await getDoc(doc(db, 'comments', selectedReport.targetId));
-          if (commentSnap.exists()) {
-            const d = commentSnap.data();
+          const { data: d } = await supabase.from('comments').select('*').eq('id', selectedReport.targetId).single();
+          if (d) {
             reportedUserId = d.authorId || d.userId;
             contentInfo = {
-              id: commentSnap.id,
+              id: d.id,
               content: d.content,
               parentTargetId: d.targetId,
               parentTargetType: d.targetType,
@@ -266,11 +259,14 @@ export default function ReportQueue() {
   const fetchReports = async () => {
     setLoading(true);
     try {
-      const snap = await getDocs(collection(db, 'reports'));
-      let list = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }) as ReportItem);
+      const { data, error } = await supabase
+        .from('reports')
+        .select('*')
+        .order('createdAt', { ascending: false });
       
-      // Client side sort
-      list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      if (error) throw error;
+      
+      let list = data as ReportItem[];
 
       if (filter === 'PENDING') {
         list = list.filter(r => (r.status as string) === 'PENDING' || (r.status as string) === 'REVIEWING' || (r.status as string) === 'PROCESSING' || (r.status as string) === 'IN_PROGRESS');
@@ -292,23 +288,20 @@ export default function ReportQueue() {
   const handleClaim = async (reportId: string) => {
     if (!currentUser) return;
     try {
-      const reportRef = doc(db, 'reports', reportId);
-      const docSnap = await getDoc(reportRef);
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.claimedBy && data.claimedBy !== currentUser.id) {
-          toast.error(`Báo cáo đã được nhận xử lý trước bởi ${data.claimedByName || data.claimedBy}`);
-          fetchReports();
-          return;
-        }
+      const { data: docData } = await supabase.from('reports').select('claimedBy, claimedByName').eq('id', reportId).single();
+      
+      if (docData && docData.claimedBy && docData.claimedBy !== currentUser.id) {
+        toast.error(`Báo cáo đã được nhận xử lý trước bởi ${docData.claimedByName || docData.claimedBy}`);
+        fetchReports();
+        return;
       }
 
-      await updateDoc(reportRef, {
+      await supabase.from('reports').update({
         status: 'IN_PROGRESS',
         claimedBy: currentUser.id,
         claimedByName: currentUser.displayName,
         claimedAt: new Date().toISOString()
-      });
+      }).eq('id', reportId);
 
       toast.success("Đã nhận xử lý báo cáo này!");
       fetchReports();
@@ -329,13 +322,12 @@ export default function ReportQueue() {
 
   const handleUnclaim = async (reportId: string) => {
     try {
-      const reportRef = doc(db, 'reports', reportId);
-      await updateDoc(reportRef, {
+      await supabase.from('reports').update({
         status: 'PENDING',
         claimedBy: null,
         claimedByName: null,
         claimedAt: null
-      });
+      }).eq('id', reportId);
 
       toast.success("Đã hủy nhận xử lý báo cáo.");
       fetchReports();
@@ -358,18 +350,18 @@ export default function ReportQueue() {
     if (!selectedReport || !currentUser) return;
 
     const dismissNote = note.trim() || 'Nội dung không vi phạm tiêu chuẩn cộng đồng.';
+    const timestamp = new Date().toISOString();
 
     try {
-      const reportRef = doc(db, 'reports', selectedReport.id);
-      await updateDoc(reportRef, {
+      await supabase.from('reports').update({
         status: 'REJECTED',
         moderatorId: currentUser.id,
         moderatorNote: dismissNote,
-        resolvedAt: serverTimestamp()
-      });
+        resolvedAt: timestamp
+      }).eq('id', selectedReport.id);
 
       // Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName,
         executorRole: currentUser.role,
@@ -378,7 +370,7 @@ export default function ReportQueue() {
         targetType: 'REPORT',
         details: `Bỏ qua báo cáo vi phạm ${selectedReport.id}. Ghi chú: ${dismissNote}`,
         reason: dismissNote,
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
       toast.success("Đã bỏ qua báo cáo!");
@@ -417,21 +409,20 @@ export default function ReportQueue() {
         selectedReport.targetType === 'FEEDBACK' ? 'feedbacks' : 
         selectedReport.targetType === 'COMMENT' ? 'comments' : 'users';
 
-      const targetRef = doc(db, collectionName, selectedReport.targetId);
-      const targetSnap = await getDoc(targetRef);
+      const { data: targetSnap } = await supabase.from(collectionName).select('*').eq('id', selectedReport.targetId).single();
+      
       let ownerId = reportedUser?.id || null;
       let targetName = selectedReport.targetName || targetContentInfo?.name || 'Nội dung';
 
-      if (targetSnap.exists()) {
-        const d = targetSnap.data();
-        ownerId = ownerId || d.creatorId || d.userId || d.senderId || d.authorId;
-        targetName = d.name || d.title || d.message || targetName;
+      if (targetSnap) {
+        ownerId = ownerId || targetSnap.creatorId || targetSnap.userId || targetSnap.senderId || targetSnap.authorId;
+        targetName = targetSnap.name || targetSnap.title || targetSnap.message || targetName;
       }
 
       const now = new Date().toISOString();
 
       // 1. Soft Delete / Hide content
-      await updateDoc(targetRef, {
+      await supabase.from(collectionName).update({
         isHidden: true,
         deletedAt: now,
         deletedBy: currentUser.id,
@@ -439,10 +430,10 @@ export default function ReportQueue() {
         removalDetails: removalDetailsText,
         removalTime: now,
         appealStatus: 'NONE'
-      });
+      }).eq('id', selectedReport.targetId);
 
       // 2. Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName,
         executorRole: currentUser.role,
@@ -455,16 +446,16 @@ export default function ReportQueue() {
       });
 
       // 3. Update Report Status
-      await updateDoc(doc(db, 'reports', selectedReport.id), {
+      await supabase.from('reports').update({
         status: 'RESOLVED',
         moderatorId: currentUser.id,
         moderatorNote: removalReasonText,
-        resolvedAt: serverTimestamp()
-      });
+        resolvedAt: now
+      }).eq('id', selectedReport.id);
 
       // 4. Send Notification ONLY to Reported User (Owner)
       if (ownerId) {
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           userId: ownerId,
           recipientId: ownerId,
           type: 'CONTENT_REMOVED',
@@ -566,7 +557,7 @@ export default function ReportQueue() {
                         </span>
                       )}
                       <span className="text-[9px] text-neutral-400 font-medium">
-                        {new Date(r.createdAt).toLocaleString('vi-VN')}
+                        {new Date(r.createdAt || 0).toLocaleString('vi-VN')}
                       </span>
                     </div>
                   </div>
@@ -982,4 +973,3 @@ export default function ReportQueue() {
     </AdminLayout>
   );
 }
-
