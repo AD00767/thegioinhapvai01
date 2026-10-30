@@ -1,5 +1,4 @@
-import { doc, updateDoc, addDoc, collection, serverTimestamp } from 'firebase/firestore';
-import { db } from './firebase';
+import { supabase } from './supabase';
 import { PromptItem } from '../types';
 
 export interface ExecuteDeletePromptParams {
@@ -26,24 +25,26 @@ export async function executeDeletePrompt({
     throw new Error("Bạn không có quyền xóa Prompt này.");
   }
 
-  // If Admin/Mod is deleting (whether another user's prompt or their own)
+  const timestamp = new Date().toISOString();
+
   if (isAdmin) {
     const removalReason = reason?.trim() || "Vi phạm tiêu chuẩn cộng đồng";
     const removalDetails = details?.trim() || "";
 
-    await updateDoc(doc(db, 'prompts', prompt.id), {
+    // 1. Cập nhật trạng thái Prompt thành đã xóa/ẩn
+    await supabase.from('prompts').update({
       isHidden: true,
-      deletedAt: new Date().toISOString(),
+      deletedAt: timestamp,
       deletedBy: currentUser.id,
       removalReason,
       removalDetails,
-      removalTime: new Date().toISOString(),
+      removalTime: timestamp,
       appealStatus: 'NONE'
-    });
+    }).eq('id', prompt.id);
 
-    // Send notification to author if author is another user
+    // 2. Gửi thông báo cho tác giả nếu Admin/Mod xóa prompt của người khác
     if (prompt.authorId && prompt.authorId !== currentUser.id) {
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
         userId: prompt.authorId,
         type: 'CONTENT_REMOVED',
         title: 'Prompt của bạn đã bị gỡ bỏ',
@@ -54,24 +55,24 @@ export async function executeDeletePrompt({
         removalReason,
         removalDetails,
         isRead: false,
-        createdAt: serverTimestamp()
+        createdAt: timestamp
       });
     }
 
-    // Add activity log / audit log
-    await addDoc(collection(db, 'activity_logs'), {
+    // 3. Ghi log hoạt động
+    await supabase.from('activity_logs').insert({
       userId: currentUser.id,
       userName: currentUser.displayName || 'Admin/Mod',
       action: 'REMOVE_PROMPT',
       details: `Gỡ bỏ Prompt "${prompt.name || prompt.title || 'Prompt'}" (ID: ${prompt.id}) - Lý do: ${removalReason}`,
-      timestamp: serverTimestamp()
+      timestamp: timestamp
     });
   } else {
-    // Regular owner self-deletion
-    await updateDoc(doc(db, 'prompts', prompt.id), {
+    // Tự xóa prompt của chính mình
+    await supabase.from('prompts').update({
       isHidden: true,
-      deletedAt: new Date().toISOString(),
+      deletedAt: timestamp,
       deletedBy: currentUser.id
-    });
+    }).eq('id', prompt.id);
   }
 }
