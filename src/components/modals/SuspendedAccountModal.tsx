@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Lock, LogOut, Send, Clock, XCircle, CheckCircle2 } from 'lucide-react';
 import { useAuthStore } from '../../store/useAuthStore';
-import { auth, db } from '../../lib/firebase';
-import { signOut } from 'firebase/auth';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { supabase } from '../../lib/supabase';
 import RemovalDetailModal from './RemovalDetailModal';
 
 export default function SuspendedAccountModal() {
@@ -22,35 +20,52 @@ export default function SuspendedAccountModal() {
       setAppealStatus(user.appealStatus as any);
     }
 
-    // Subscribe in realtime to user's account appeals
-    const q = query(
-      collection(db, 'appeals'),
-      where('userId', '==', user.id),
-      where('targetType', '==', 'ACCOUNT')
-    );
-
-    const unsubscribe = onSnapshot(q, (snap) => {
-      if (!snap.empty) {
-        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
-        docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        const latest = docs[0];
-        setAppealStatus(latest.status || 'PENDING');
-      } else {
-        setAppealStatus((user.appealStatus as any) || 'NONE');
+    // Lấy trạng thái appeal ban đầu
+    const fetchInitialAppeal = async () => {
+      const { data } = await supabase
+        .from('appeals')
+        .select('status, createdAt')
+        .eq('userId', user.id)
+        .eq('targetType', 'ACCOUNT')
+        .order('createdAt', { ascending: false })
+        .limit(1)
+        .single();
+      
+      if (data) {
+        setAppealStatus(data.status as any);
       }
-    }, (err) => {
-      console.error("Error listening to user appeal status:", err);
-      setAppealStatus((user.appealStatus as any) || 'NONE');
-    });
+    };
+    
+    fetchInitialAppeal();
 
-    return () => unsubscribe();
+    // Subscribe in realtime to user's account appeals bằng Supabase
+    const appealSubscription = supabase
+      .channel('public:appeals')
+      .on('postgres_changes', 
+        { 
+          event: '*', 
+          schema: 'public', 
+          table: 'appeals', 
+          filter: `userId=eq.${user.id}` 
+        }, 
+        (payload) => {
+          if (payload.new && payload.new.targetType === 'ACCOUNT') {
+            setAppealStatus(payload.new.status as any);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(appealSubscription);
+    };
   }, [user?.id, user?.isLocked, user?.appealStatus]);
 
   if (!user || !user.isLocked) return null;
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await supabase.auth.signOut();
       localStorage.removeItem('custom_auth_user');
       setAuth(null, null);
     } catch (err) {
@@ -183,7 +198,7 @@ export default function SuspendedAccountModal() {
           onSuccess={(newAppeal) => {
             setAppealStatus('PENDING');
             if (user) {
-              setAuth(useAuthStore.getState().firebaseUser, {
+              setAuth(user, {
                 ...user,
                 appealStatus: 'PENDING'
               });
