@@ -3,8 +3,8 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   Heart, Bookmark, Eye, ExternalLink, Sparkles, User as UserIcon, Tag, MessageSquare, ArrowLeft, Flag, AlertCircle, Trash2, Share2, ShieldAlert 
 } from 'lucide-react';
-import { doc, getDoc, updateDoc, increment, collection, addDoc, query, where, getDocs, deleteDoc, serverTimestamp, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Loại bỏ Firebase, sử dụng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useUserInteractions } from '../context/UserInteractionsContext';
 import { CharacterItem } from '../types';
@@ -54,35 +54,43 @@ export default function CharacterDetail() {
     setError(false);
 
     try {
-      let snap;
-      let docId = '';
+      let data = null;
+      let docId = id;
       const isNumeric = /^[0-9]{9}$/.test(id);
 
       if (isNumeric) {
-        const q = query(collection(db, 'characters'), where('numericId', '==', id), limit(1));
-        const querySnap = await getDocs(q);
-        if (!querySnap.empty) {
-          snap = querySnap.docs[0];
-          docId = snap.id;
+        const { data: numData } = await supabase
+          .from('characters')
+          .select('*')
+          .eq('numericId', id)
+          .limit(1)
+          .single();
+          
+        if (numData) {
+          data = numData;
+          docId = numData.id;
         }
       }
 
-      if (!snap) {
-        const docRef = doc(db, 'characters', id);
-        const directSnap = await getDoc(docRef);
-        if (directSnap.exists()) {
-          snap = directSnap;
-          docId = directSnap.id;
+      if (!data) {
+        const { data: directData } = await supabase
+          .from('characters')
+          .select('*')
+          .eq('id', id)
+          .single();
+          
+        if (directData) {
+          data = directData;
+          docId = directData.id;
         }
       }
 
-      if (!snap || !snap.exists()) {
+      if (!data) {
         setError(true);
         setLoading(false);
         return;
       }
 
-      const data = snap.data();
       const isStaffOrOwner = Boolean(
         user && (
           user.id === data.creatorId ||
@@ -111,11 +119,11 @@ export default function CharacterDetail() {
         const throttleTime = 5 * 60 * 1000; // 5 minutes
 
         if (!lastViewed || (now - parseInt(lastViewed, 10)) > throttleTime) {
-          setViewsCount((item.viewsCount || 0) + 1);
+          const newViewsCount = (item.viewsCount || 0) + 1;
+          setViewsCount(newViewsCount);
           localStorage.setItem(storageKey, now.toString());
           try {
-            const docRefReal = doc(db, 'characters', docId);
-            await updateDoc(docRefReal, { viewsCount: increment(1) });
+            await supabase.from('characters').update({ viewsCount: newViewsCount }).eq('id', docId);
           } catch (e) {
             console.error("View count update error:", e);
           }
@@ -141,24 +149,24 @@ export default function CharacterDetail() {
 
   const fetchRelated = async (currentChar: CharacterItem) => {
     try {
-      const q = query(collection(db, 'characters'));
-      const snap = await getDocs(q);
-      const list: CharacterItem[] = [];
+      const { data: relatedData } = await supabase
+        .from('characters')
+        .select('*')
+        .neq('id', currentChar.id)
+        .is('deletedAt', null)
+        .is('isHidden', false)
+        .limit(10); // Fetch a few to filter locally
 
-      snap.docs.forEach(d => {
-        const data = d.data();
-        if (d.id !== currentChar.id && !data.deletedAt && !data.isHidden) {
-          list.push({ id: d.id, ...data } as CharacterItem);
-        }
-      });
-
-      // Filter by same creator or tag match
-      const related = list.filter(c => 
-        c.creatorId === currentChar.creatorId ||
-        c.tags?.some(t => currentChar.tags?.includes(t))
-      ).slice(0, 3);
-
-      setRelatedCharacters(related);
+      if (relatedData) {
+        const list = relatedData as CharacterItem[];
+        // Filter by same creator or tag match
+        const related = list.filter(c => 
+          c.creatorId === currentChar.creatorId ||
+          (c.tags && currentChar.tags && c.tags.some((t: string) => currentChar.tags!.includes(t)))
+        ).slice(0, 3);
+  
+        setRelatedCharacters(related);
+      }
     } catch (e) {
       console.error("Fetch related characters error:", e);
     }
@@ -189,30 +197,34 @@ export default function CharacterDetail() {
     if (!character) return;
 
     try {
-      const q = query(
-        collection(db, 'character_likes'),
-        where('userId', '==', user.id),
-        where('characterId', '==', character.id)
-      );
-      const snap = await getDocs(q);
-      const charRef = doc(db, 'characters', character.id);
+      const { data: snap } = await supabase
+        .from('character_likes')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('characterId', character.id);
 
-      if (!snap.empty) {
-        for (const d of snap.docs) {
-          await deleteDoc(doc(db, 'character_likes', d.id));
+      if (snap && snap.length > 0) {
+        for (const d of snap) {
+          await supabase.from('character_likes').delete().eq('id', d.id);
         }
-        await updateDoc(charRef, { likesCount: increment(-1) });
+        const newLikesCount = Math.max(0, likesCount - 1);
+        await supabase.from('characters').update({ likesCount: newLikesCount }).eq('id', character.id);
+        
         setIsLiked(false);
-        setLikesCount(prev => Math.max(0, prev - 1));
+        setLikesCount(newLikesCount);
+        setLikedState('CHARACTER', character.id, false);
       } else {
-        await addDoc(collection(db, 'character_likes'), {
+        await supabase.from('character_likes').insert({
           userId: user.id,
           characterId: character.id,
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
-        await updateDoc(charRef, { likesCount: increment(1) });
+        const newLikesCount = likesCount + 1;
+        await supabase.from('characters').update({ likesCount: newLikesCount }).eq('id', character.id);
+        
         setIsLiked(true);
-        setLikesCount(prev => prev + 1);
+        setLikesCount(newLikesCount);
+        setLikedState('CHARACTER', character.id, true);
         toast.success("Đã thích Character!");
       }
     } catch (err) {
@@ -229,32 +241,36 @@ export default function CharacterDetail() {
     if (!character) return;
 
     try {
-      const q = query(
-        collection(db, 'bookmarks'),
-        where('userId', '==', user.id),
-        where('targetId', '==', character.id),
-        where('targetType', '==', 'CHARACTER')
-      );
-      const snap = await getDocs(q);
-      const charRef = doc(db, 'characters', character.id);
+      const { data: snap } = await supabase
+        .from('bookmarks')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('targetId', character.id)
+        .eq('targetType', 'CHARACTER');
 
-      if (!snap.empty) {
-        for (const d of snap.docs) {
-          await deleteDoc(doc(db, 'bookmarks', d.id));
+      if (snap && snap.length > 0) {
+        for (const d of snap) {
+          await supabase.from('bookmarks').delete().eq('id', d.id);
         }
-        await updateDoc(charRef, { savesCount: increment(-1) });
+        const newSavesCount = Math.max(0, savesCount - 1);
+        await supabase.from('characters').update({ savesCount: newSavesCount }).eq('id', character.id);
+        
         setIsBookmarked(false);
-        setSavesCount(prev => Math.max(0, prev - 1));
+        setSavesCount(newSavesCount);
+        setBookmarkState('CHARACTER', character.id, false);
       } else {
-        await addDoc(collection(db, 'bookmarks'), {
+        await supabase.from('bookmarks').insert({
           userId: user.id,
           targetId: character.id,
           targetType: 'CHARACTER',
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
-        await updateDoc(charRef, { savesCount: increment(1) });
+        const newSavesCount = savesCount + 1;
+        await supabase.from('characters').update({ savesCount: newSavesCount }).eq('id', character.id);
+        
         setIsBookmarked(true);
-        setSavesCount(prev => prev + 1);
+        setSavesCount(newSavesCount);
+        setBookmarkState('CHARACTER', character.id, true);
         toast.success("Đã lưu Character vào bộ sưu tập!");
       }
     } catch (err) {
@@ -282,21 +298,22 @@ export default function CharacterDetail() {
     if (!character) return;
     try {
       const now = new Date().toISOString();
-      const charRef = doc(db, 'characters', character.id);
 
       if (isOwner) {
         // Owner self-delete
-        await updateDoc(charRef, {
+        await supabase.from('characters').update({
           deletedAt: now,
           isHidden: true,
           deletedBy: user?.id
-        });
+        }).eq('id', character.id);
+        
         toast.success("Đã xóa Character thành công!");
       } else {
         // Admin / Moderator removal
         const finalReason = reason || "Vi phạm tiêu chuẩn cộng đồng";
         const finalDetails = details || finalReason;
-        await updateDoc(charRef, {
+        
+        await supabase.from('characters').update({
           isHidden: true,
           deletedAt: now,
           deletedBy: user?.id,
@@ -304,11 +321,11 @@ export default function CharacterDetail() {
           removalDetails: finalDetails,
           removalTime: now,
           appealStatus: 'NONE'
-        });
+        }).eq('id', character.id);
 
         // Send notification to character owner
         if (character.creatorId) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             userId: character.creatorId,
             recipientId: character.creatorId,
             type: 'CONTENT_REMOVED',
@@ -326,7 +343,7 @@ export default function CharacterDetail() {
         }
 
         // Log audit
-        await addDoc(collection(db, 'audit_logs'), {
+        await supabase.from('audit_logs').insert({
           executorId: user?.id,
           executorName: user?.displayName,
           action: 'DELETE_CHARACTER',
