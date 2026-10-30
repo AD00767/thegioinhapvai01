@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Xóa Firebase, thay bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 
 interface UserInteractionsContextType {
@@ -50,44 +50,56 @@ export const UserInteractionsProvider: React.FC<{ children: React.ReactNode }> =
     }
 
     try {
-      // 1. Fetch character likes for current user
-      const qLike = query(collection(db, 'character_likes'), where('userId', '==', user.id));
-      const snapLike = await getDocs(qLike);
-      const likesSet = new Set<string>();
-      snapLike.docs.forEach(docSnap => {
-        const charId = docSnap.data().characterId;
-        if (charId) likesSet.add(charId);
-      });
-      setLikedCharacterIds(likesSet);
+      // 1. Fetch character likes (Supabase)
+      const { data: likesData, error: likesError } = await supabase
+        .from('character_likes')
+        .select('characterId')
+        .eq('userId', user.id);
 
-      // 2. Fetch bookmarks for current user
-      const qBook = query(collection(db, 'bookmarks'), where('userId', '==', user.id));
-      const snapBook = await getDocs(qBook);
-      const charBooksSet = new Set<string>();
-      const promptBooksSet = new Set<string>();
-      snapBook.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data.targetType === 'CHARACTER' && data.targetId) {
-          charBooksSet.add(data.targetId);
-        } else if (data.targetType === 'PROMPT' && data.targetId) {
-          promptBooksSet.add(data.targetId);
-        }
-      });
-      setBookmarkedCharacterIds(charBooksSet);
-      setBookmarkedPromptIds(promptBooksSet);
+      if (!likesError && likesData) {
+        const likesSet = new Set<string>();
+        likesData.forEach(item => {
+          if (item.characterId) likesSet.add(item.characterId);
+        });
+        setLikedCharacterIds(likesSet);
+      }
 
-      // 3. Fetch followed creators for current user
-      const qFollow = query(collection(db, 'follows'), where('followerId', '==', user.id));
-      const snapFollow = await getDocs(qFollow);
-      const followsSet = new Set<string>();
-      snapFollow.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        const cId = data.creatorId || data.targetCreatorId;
-        if (cId) followsSet.add(cId);
-      });
-      setFollowedCreatorIds(followsSet);
+      // 2. Fetch bookmarks (Supabase)
+      const { data: bookData, error: bookError } = await supabase
+        .from('bookmarks')
+        .select('targetId, targetType')
+        .eq('userId', user.id);
+
+      if (!bookError && bookData) {
+        const charBooksSet = new Set<string>();
+        const promptBooksSet = new Set<string>();
+        bookData.forEach(item => {
+          if (item.targetType === 'CHARACTER' && item.targetId) {
+            charBooksSet.add(item.targetId);
+          } else if (item.targetType === 'PROMPT' && item.targetId) {
+            promptBooksSet.add(item.targetId);
+          }
+        });
+        setBookmarkedCharacterIds(charBooksSet);
+        setBookmarkedPromptIds(promptBooksSet);
+      }
+
+      // 3. Fetch followed creators (Supabase)
+      const { data: followData, error: followError } = await supabase
+        .from('follows')
+        .select('creatorId, targetCreatorId')
+        .eq('followerId', user.id);
+
+      if (!followError && followData) {
+        const followsSet = new Set<string>();
+        followData.forEach(item => {
+          const cId = item.creatorId || item.targetCreatorId;
+          if (cId) followsSet.add(cId);
+        });
+        setFollowedCreatorIds(followsSet);
+      }
     } catch (err) {
-      console.error("Error fetching user interactions:", err);
+      console.error("Error fetching user interactions with Supabase:", err);
     }
   };
 
