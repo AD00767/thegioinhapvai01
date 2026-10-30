@@ -5,12 +5,9 @@
 
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db, syncAuthUser } from './lib/firebase';
-import { doc, getDoc, onSnapshot, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
-import { signOut } from 'firebase/auth';
-import { useAuthStore } from './store/useAuthStore';
 import toast, { Toaster } from 'react-hot-toast';
+import { useAuthStore } from './store/useAuthStore';
+import { supabase } from './lib/supabase'; // Import Supabase thay vì Firebase
 
 import Layout from './components/layout/Layout';
 import Welcome from './pages/Welcome';
@@ -63,7 +60,6 @@ function RootGate() {
 
   if (!isInitialized) return null;
 
-  // If user is authenticated or has entered as a guest, show Home inside Layout
   if (user || hasEntered) {
     return (
       <Layout>
@@ -72,40 +68,40 @@ function RootGate() {
     );
   }
 
-  // Otherwise, show full screen Welcome Page on first visit
   return <Welcome onStart={() => setHasEntered(true)} />;
 }
 
 function UserRealtimeSync() {
-  const { user, firebaseUser, setAuth } = useAuthStore();
+  const { user, setAuth } = useAuthStore();
 
   useEffect(() => {
     if (!user?.id) return;
 
-    const userRef = doc(db, 'users', user.id);
-    const unsubscribe = onSnapshot(userRef, async (docSnap) => {
-      if (!docSnap.exists()) return;
+    const fetchAndSyncUser = async () => {
+      const { data: userData, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', user.id)
+        .single();
 
-      const userData = docSnap.data() as any;
+      if (error || !userData) return;
 
       const isDeleted = Boolean(userData.deletedAt || userData.status === 'DELETED');
-      const isLocked = Boolean(userData.isLocked || isDeleted);
+      let isLocked = Boolean(userData.isLocked || isDeleted);
 
-      // Check lock status (only auto-unlock non-deleted accounts with expired lock)
       if (userData.isLocked && !isDeleted) {
         const lockExpired = userData.lockExpiresAt && new Date(userData.lockExpiresAt).getTime() < Date.now();
         if (lockExpired) {
-          // Auto unlock if expired
-          await updateDoc(userRef, { isLocked: false, lockReason: null, lockExpiresAt: null, appealStatus: null }).catch(() => {});
+          await supabase.from('users').update({ isLocked: false, lockReason: null, lockExpiresAt: null, appealStatus: null }).eq('id', user.id);
           userData.isLocked = false;
+          isLocked = false;
         }
       }
 
-      // Sync user data to Zustand store
-      const currentAuthUser = useAuthStore.getState().user;
-      if (currentAuthUser) {
-        setAuth(firebaseUser, {
-          ...currentAuthUser,
+      const currentAuthStore = useAuthStore.getState();
+      if (currentAuthStore.user) {
+        setAuth(currentAuthStore.firebaseUser, {
+          ...currentAuthStore.user,
           ...userData,
           isLocked: isLocked,
           status: isDeleted ? 'DELETED' : (userData.status || 'ACTIVE'),
@@ -113,11 +109,23 @@ function UserRealtimeSync() {
           id: user.id
         });
       }
-    }, (err) => {
-      console.error("Realtime user sync error:", err);
-    });
+    };
 
-    return () => unsubscribe();
+    fetchAndSyncUser();
+
+    // Thiết lập lắng nghe Realtime từ Supabase
+    const channel = supabase
+      .channel(`public:users:id=eq.${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${user.id}` },
+        () => { fetchAndSyncUser(); }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [user?.id]);
 
   return null;
@@ -129,113 +137,112 @@ export default function App() {
   useEffect(() => {
     initThemeAndFont();
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          await syncAuthUser(firebaseUser);
-        } catch (e) {
-          console.error("Failed to sync user profile in auth listener:", e);
+    const handleSessionSync = async (parsed: any) => {
+      if (parsed && parsed.id) {
+        const { data: userData } = await supabase.from('users').select('*').eq('id', parsed.id).single();
+        
+        if (userData) {
+          const isDeleted = Boolean(userData.deletedAt || userData.status === 'DELETED');
+          if (isDeleted) {
+            userData.isLocked = true;
+            userData.status = 'DELETED';
+            if (!userData.lockReason && userData.deleteReason) {
+              userData.lockReason = userData.deleteReason;
+            }
+          }
+
+          if (userData.isLocked && !isDeleted && userData.lockExpiresAt && new Date(userData.lockExpiresAt).getTime() < Date.now()) {
+            await supabase.from('users').update({ isLocked: false, lockReason: null, lockExpiresAt: null, appealStatus: null }).eq('id', parsed.id);
+            userData.isLocked = false;
+          }
+
+          if (userData.isLocked || isDeleted) {
+            try {
+              const { data: appealDocs } = await supabase
+                .from('appeals')
+                .select('*')
+                .eq('userId', parsed.id)
+                .eq('targetType', 'ACCOUNT')
+                .order('createdAt', { ascending: false })
+                .limit(1);
+                
+              if (appealDocs && appealDocs.length > 0) {
+                const latestAppeal = appealDocs[0];
+                if (latestAppeal.status === 'APPROVED') {
+                  await supabase.from('users').update({ 
+                    isLocked: false, status: 'ACTIVE', deletedAt: null, deletedBy: null, deletedByName: null,
+                    deleteReason: null, lockReason: null, lockExpiresAt: null, appealStatus: 'APPROVED' 
+                  }).eq('id', parsed.id);
+                  userData.isLocked = false;
+                  userData.status = 'ACTIVE';
+                  userData.deletedAt = null;
+                  userData.deleteReason = null;
+                  userData.appealStatus = 'APPROVED';
+                } else {
+                  userData.appealStatus = latestAppeal.status || 'PENDING';
+                }
+              } else {
+                userData.appealStatus = 'NONE';
+              }
+            } catch (appealErr) {
+              console.warn("Lỗi kiểm tra kháng cáo Supabase:", appealErr);
+            }
+          }
+
+          const simulatedUser: any = {
+            uid: parsed.id,
+            email: userData.email,
+            displayName: userData.displayName,
+            photoURL: userData.avatar
+          };
+          
+          if (userData.themePreference) applyTheme(userData.themePreference);
+          setAuth(simulatedUser, { id: parsed.id, ...userData });
+        } else {
+          setAuth({ uid: parsed.id, email: parsed.email, displayName: parsed.displayName, photoURL: parsed.avatar } as any, parsed);
         }
       } else {
-        // Check if custom auth session exists (for database-backed email/password users)
+        setAuth(null, null);
+      }
+      setInitialized(true);
+    };
+
+    // Kiểm tra phiên đăng nhập hiện tại từ Supabase hoặc LocalStorage
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.user) {
+        await handleSessionSync({ id: session.user.id, email: session.user.email, displayName: session.user.user_metadata?.full_name, avatar: session.user.user_metadata?.avatar_url });
+      } else {
         const customSession = localStorage.getItem('custom_auth_user');
         if (customSession) {
           try {
-            const parsed = JSON.parse(customSession);
-            if (parsed && parsed.id) {
-              const userRef = doc(db, 'users', parsed.id);
-              const userSnap = await getDoc(userRef);
-              if (userSnap.exists()) {
-                const userData = userSnap.data();
-                const isDeleted = Boolean(userData.deletedAt || userData.status === 'DELETED');
-                if (isDeleted) {
-                  userData.isLocked = true;
-                  userData.status = 'DELETED';
-                  if (!userData.lockReason && userData.deleteReason) {
-                    userData.lockReason = userData.deleteReason;
-                  }
-                }
-
-                // Check if expired lock
-                if (userData.isLocked && !isDeleted && userData.lockExpiresAt && new Date(userData.lockExpiresAt).getTime() < Date.now()) {
-                  await updateDoc(userRef, { isLocked: false, lockReason: null, lockExpiresAt: null, appealStatus: null }).catch(() => {});
-                  userData.isLocked = false;
-                }
-
-                // If user is locked or deleted, query latest appeal
-                if (userData.isLocked || isDeleted) {
-                  try {
-                    const appealQ = query(
-                      collection(db, 'appeals'),
-                      where('userId', '==', parsed.id),
-                      where('targetType', '==', 'ACCOUNT')
-                    );
-                    const appealSnap = await getDocs(appealQ);
-                    if (!appealSnap.empty) {
-                      const appealDocs = appealSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
-                      appealDocs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-                      const latestAppeal = appealDocs[0];
-                      if (latestAppeal.status === 'APPROVED') {
-                        await updateDoc(userRef, { 
-                          isLocked: false, 
-                          status: 'ACTIVE',
-                          deletedAt: null,
-                          deletedBy: null,
-                          deletedByName: null,
-                          deleteReason: null,
-                          lockReason: null, 
-                          lockExpiresAt: null, 
-                          appealStatus: 'APPROVED' 
-                        }).catch(() => {});
-                        userData.isLocked = false;
-                        userData.status = 'ACTIVE';
-                        userData.deletedAt = null;
-                        userData.deleteReason = null;
-                        userData.appealStatus = 'APPROVED';
-                      } else {
-                        userData.appealStatus = latestAppeal.status || 'PENDING';
-                      }
-                    } else {
-                      userData.appealStatus = 'NONE';
-                    }
-                  } catch (appealErr) {
-                    console.warn("Check appeal during custom session restoration error:", appealErr);
-                  }
-                }
-
-                const simulatedUser: any = {
-                  uid: parsed.id,
-                  email: userData.email,
-                  displayName: userData.displayName,
-                  photoURL: userData.avatar
-                };
-                if (userData.themePreference) {
-                  applyTheme(userData.themePreference);
-                }
-                setAuth(simulatedUser, { id: parsed.id, ...userData });
-              } else {
-                setAuth({
-                  uid: parsed.id,
-                  email: parsed.email,
-                  displayName: parsed.displayName,
-                  photoURL: parsed.avatar
-                } as any, parsed);
-              }
-            } else {
-              setAuth(null, null);
-            }
+            await handleSessionSync(JSON.parse(customSession));
           } catch (err) {
-            console.error("Failed to restore custom auth session:", err);
             setAuth(null, null);
+            setInitialized(true);
           }
         } else {
           setAuth(null, null);
+          setInitialized(true);
         }
       }
-      setInitialized(true);
+    };
+
+    checkAuth();
+
+    // Lắng nghe thay đổi trạng thái đăng nhập từ Supabase
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        await handleSessionSync({ id: session.user.id, email: session.user.email, displayName: session.user.user_metadata?.full_name, avatar: session.user.user_metadata?.avatar_url });
+      } else if (!localStorage.getItem('custom_auth_user')) {
+        setAuth(null, null);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   return (
@@ -280,7 +287,6 @@ export default function App() {
           <Route path="/admin/managers" element={<ProtectedRoute><AdminModeratorManager /></ProtectedRoute>} />
           <Route path="/admin/creators" element={<ProtectedRoute><CreatorManager /></ProtectedRoute>} />
           <Route path="/admin/content" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
-          {/* Add more routes later */}
           <Route path="*" element={<div className="p-8 text-center">404 - Not Found</div>} />
         </Route>
       </Routes>
@@ -288,4 +294,3 @@ export default function App() {
   </UserInteractionsProvider>
   );
 }
-
