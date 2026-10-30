@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Sparkles, Search, UserCheck, Flame, Clock, Award, RefreshCw } from 'lucide-react';
-import { collection, query, where, getDocs, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Xóa Firebase, thay bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useSeo } from '../hooks/useSeo';
 import { CreatorItem } from '../types';
 import CreatorCard from '../components/CreatorCard';
@@ -35,23 +35,23 @@ export default function Creators() {
   const fetchCreators = async () => {
     setLoading(true);
     try {
-      // Query users who have creatorStatus = true OR role = 'CREATOR' / 'ADMIN'
-      const q = query(
-        collection(db, 'users'),
-        where('creatorStatus', '==', true),
-        limit(60)
-      );
-      const snap = await getDocs(q);
-      const list: CreatorItem[] = [];
+      // Dùng Supabase truy vấn bảng users
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('creatorStatus', true)
+        .is('deletedAt', null)
+        .neq('status', 'DELETED')
+        .is('isDeleted', false)
+        .limit(60);
 
-      snap.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        if (!data.deletedAt && data.status !== 'DELETED' && !data.isDeleted) {
-          list.push({ id: docSnap.id, ...data } as CreatorItem);
-        }
-      });
+      if (error) {
+        throw error;
+      }
 
-      setCreators(list);
+      if (data) {
+        setCreators(data as CreatorItem[]);
+      }
     } catch (err) {
       console.error("Lỗi khi tải danh sách Creator:", err);
       toast.error("Không thể tải danh sách Creator.");
