@@ -3,8 +3,8 @@ import {
   User as UserIcon, Settings, Plus, Pin, Heart, Bookmark, Users, UserCheck, 
   Sparkles, PenTool, ExternalLink, Edit3, Trash2, Copy, Check, Facebook, Instagram, Music, MessageSquare, ShieldAlert, ShieldCheck, X, Globe, Share2
 } from 'lucide-react';
-import { collection, query, where, getDocs, doc, updateDoc, setDoc, deleteDoc, getDoc, addDoc, increment } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Thay thế Firebase bằng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { CharacterItem, PromptItem } from '../types';
 import EditProfileModal from '../components/profile/EditProfileModal';
@@ -27,7 +27,6 @@ import { Link } from 'react-router-dom';
 
 export default function Profile() {
   const { user } = useAuthStore();
-
 
   const [activeTab, setActiveTab] = useState<'characters' | 'prompts' | 'liked' | 'bookmarks' | 'appeals'>('characters');
 
@@ -95,19 +94,20 @@ export default function Profile() {
     }
     setSubmittingRequest(true);
     try {
-      await addDoc(collection(db, 'creator_requests'), {
+      const timestamp = new Date().toISOString();
+      await supabase.from('creator_requests').insert({
         userId: user.id,
         userDisplayName: reqName.trim(),
         userAvatar: user.avatar || '',
         userEmail: user.email || '',
         reason: reqReason.trim(),
         status: 'PENDING',
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
-      await setDoc(doc(db, 'users', user.id), {
+      await supabase.from('users').update({
         creatorRequestStatus: 'PENDING'
-      }, { merge: true });
+      }).eq('id', user.id);
 
       toast.success("Đã gửi yêu cầu trở thành Creator thành công!");
       setHasPendingRequest(true);
@@ -128,154 +128,125 @@ export default function Profile() {
 
     try {
       // Check pending creator request
-      const reqQuery = query(collection(db, 'creator_requests'), where('userId', '==', user.id), where('status', '==', 'PENDING'));
-      const reqSnap = await getDocs(reqQuery);
-      setHasPendingRequest(!reqSnap.empty);
+      const { data: reqData } = await supabase
+        .from('creator_requests')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('status', 'PENDING')
+        .limit(1);
+      
+      setHasPendingRequest(reqData && reqData.length > 0);
 
       // 1. Fetch my Created Characters
-      const charQuery = query(collection(db, 'characters'), where('creatorId', '==', user.id));
-      const charSnap = await getDocs(charQuery);
-      const fetchedChars: CharacterItem[] = [];
-      let totalLikesOnMyCharsSum = 0;
-      let totalCharSavesOnMyCharsSum = 0;
+      const { data: charData } = await supabase
+        .from('characters')
+        .select('*')
+        .eq('creatorId', user.id)
+        .is('deletedAt', null)
+        .is('isHidden', false);
 
-      charSnap.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt && !data.isHidden) {
-          const charItem = { id: d.id, ...data } as CharacterItem;
-          fetchedChars.push(charItem);
-          totalLikesOnMyCharsSum += Number(data.likesCount || 0);
-          totalCharSavesOnMyCharsSum += Number(data.savesCount || 0);
-        }
-      });
-      setMyCharacters(fetchedChars);
+      if (charData) {
+        setMyCharacters(charData as CharacterItem[]);
+      }
 
       // 2. Fetch my Created Prompts
-      const promptQuery = query(collection(db, 'prompts'), where('authorId', '==', user.id));
-      const promptSnap = await getDocs(promptQuery);
-      const fetchedPrompts: PromptItem[] = [];
-      let totalPromptSavesOnMyPromptsSum = 0;
+      const { data: promptData } = await supabase
+        .from('prompts')
+        .select('*')
+        .eq('authorId', user.id)
+        .is('deletedAt', null)
+        .is('isHidden', false);
 
-      promptSnap.docs.forEach(d => {
-        const data = d.data();
-        if (!data.deletedAt && !data.isHidden) {
-          const pItem = { id: d.id, ...data } as PromptItem;
-          fetchedPrompts.push(pItem);
-          totalPromptSavesOnMyPromptsSum += Number(data.savesCount || 0);
-        }
-      });
-      setMyPrompts(fetchedPrompts);
-
-      // 3. Fetch Liked Characters by THIS USER (checking both character_likes and legacy likes)
-      const [charLikesSnap, legacyLikesSnap] = await Promise.all([
-        getDocs(query(collection(db, 'character_likes'), where('userId', '==', user.id))),
-        getDocs(query(collection(db, 'likes'), where('userId', '==', user.id)))
-      ]);
-
-      const likedCharIds = Array.from(new Set([
-        ...charLikesSnap.docs.map(d => d.data().characterId || d.data().targetId),
-        ...legacyLikesSnap.docs.map(d => d.data().characterId || d.data().targetId)
-      ])).filter(Boolean) as string[];
-
-      const likedCharsFetched: CharacterItem[] = [];
-      if (likedCharIds.length > 0) {
-        // Fetch in batches of 30 (Firestore limit for 'in' operator)
-        const chunks = [];
-        for (let i = 0; i < likedCharIds.length; i += 30) {
-          chunks.push(likedCharIds.slice(i, i + 30));
-        }
-
-        const charDocsResults = await Promise.all(
-          chunks.map(chunk => getDocs(query(collection(db, 'characters'), where('__name__', 'in', chunk))))
-        );
-
-        charDocsResults.forEach(snap => {
-          snap.docs.forEach(d => {
-            const data = d.data();
-            if (!data.deletedAt && !data.isHidden) {
-              likedCharsFetched.push({ id: d.id, ...data } as CharacterItem);
-            }
-          });
-        });
+      if (promptData) {
+        setMyPrompts(promptData as PromptItem[]);
       }
-      setLikedCharacters(likedCharsFetched);
 
-      // 4. Fetch Bookmarks (Saved Characters & Saved Prompts by THIS USER)
-      const bmSnap = await getDocs(query(collection(db, 'bookmarks'), where('userId', '==', user.id)));
-      
-      const savedCharIds: string[] = [];
-      const savedPromptIds: string[] = [];
+      // 3. Fetch Liked Characters
+      const { data: likesData } = await supabase
+        .from('character_likes')
+        .select('characterId')
+        .eq('userId', user.id);
 
-      bmSnap.docs.forEach(bDoc => {
-        const bData = bDoc.data();
-        const targetId = bData.targetId || bData.characterId || bData.promptId;
-        const targetType = bData.targetType || (bData.characterId ? 'CHARACTER' : bData.promptId ? 'PROMPT' : null);
+      if (likesData && likesData.length > 0) {
+        const likedIds = likesData.map(like => like.characterId).filter(Boolean);
+        const { data: likedCharsData } = await supabase
+          .from('characters')
+          .select('*')
+          .in('id', likedIds)
+          .is('deletedAt', null)
+          .is('isHidden', false);
+          
+        if (likedCharsData) {
+          setLikedCharacters(likedCharsData as CharacterItem[]);
+        }
+      } else {
+        setLikedCharacters([]);
+      }
 
-        if (targetType === 'CHARACTER' && targetId) savedCharIds.push(targetId);
-        else if (targetType === 'PROMPT' && targetId) savedPromptIds.push(targetId);
-      });
+      // 4. Fetch Bookmarks
+      const { data: bookmarksData } = await supabase
+        .from('bookmarks')
+        .select('targetId, targetType')
+        .eq('userId', user.id);
 
-      const uniqueSavedCharIds = Array.from(new Set(savedCharIds));
-      const uniqueSavedPromptIds = Array.from(new Set(savedPromptIds));
+      if (bookmarksData && bookmarksData.length > 0) {
+        const savedCharIds = bookmarksData.filter(b => b.targetType === 'CHARACTER').map(b => b.targetId);
+        const savedPromptIds = bookmarksData.filter(b => b.targetType === 'PROMPT').map(b => b.targetId);
 
-      const [savedChars, savedPrompts] = await Promise.all([
-        (async () => {
-          const list: CharacterItem[] = [];
-          if (uniqueSavedCharIds.length > 0) {
-            const chunks = [];
-            for (let i = 0; i < uniqueSavedCharIds.length; i += 30) chunks.push(uniqueSavedCharIds.slice(i, i + 30));
-            const snaps = await Promise.all(chunks.map(c => getDocs(query(collection(db, 'characters'), where('__name__', 'in', c)))));
-            snaps.forEach(s => s.docs.forEach(d => { if (!d.data().deletedAt && !d.data().isHidden) list.push({ id: d.id, ...d.data() } as CharacterItem); }));
-          }
-          return list;
-        })(),
-        (async () => {
-          const list: PromptItem[] = [];
-          if (uniqueSavedPromptIds.length > 0) {
-            const chunks = [];
-            for (let i = 0; i < uniqueSavedPromptIds.length; i += 30) chunks.push(uniqueSavedPromptIds.slice(i, i + 30));
-            const snaps = await Promise.all(chunks.map(c => getDocs(query(collection(db, 'prompts'), where('__name__', 'in', c)))));
-            snaps.forEach(s => s.docs.forEach(d => { if (!d.data().deletedAt && !d.data().isHidden) list.push({ id: d.id, ...d.data() } as PromptItem); }));
-          }
-          return list;
-        })()
-      ]);
-      
-      setBookmarkedItems({ characters: savedChars, prompts: savedPrompts });
+        let sChars: CharacterItem[] = [];
+        let sPrompts: PromptItem[] = [];
 
-      // Calculate 5 Stats Counters precisely based on USER'S PERSONAL COLLECTION
-      // This ensures "Chuẩn xác" and "Trơn tru" between counters and tabs.
-      
-      // 1. Lượt thích: Number of characters the user has liked
-      setTotalLikesCount(likedCharsFetched.length);
+        if (savedCharIds.length > 0) {
+          const { data: chars } = await supabase
+            .from('characters')
+            .select('*')
+            .in('id', savedCharIds)
+            .is('deletedAt', null)
+            .is('isHidden', false);
+          if (chars) sChars = chars as CharacterItem[];
+        }
 
-      // 2. Lưu Character: Number of unique characters saved in bookmarks
-      setTotalCharSavesCount(savedChars.length);
+        if (savedPromptIds.length > 0) {
+          const { data: prompts } = await supabase
+            .from('prompts')
+            .select('*')
+            .in('id', savedPromptIds)
+            .is('deletedAt', null)
+            .is('isHidden', false);
+          if (prompts) sPrompts = prompts as PromptItem[];
+        }
 
-      // 3. Lưu Prompt: Number of unique prompts saved in bookmarks
-      setTotalPromptSavesCount(savedPrompts.length);
+        setBookmarkedItems({ characters: sChars, prompts: sPrompts });
+        setTotalCharSavesCount(sChars.length);
+        setTotalPromptSavesCount(sPrompts.length);
+      } else {
+        setBookmarkedItems({ characters: [], prompts: [] });
+        setTotalCharSavesCount(0);
+        setTotalPromptSavesCount(0);
+      }
 
-      // 4. Người Theo Dõi (Followers count)
+      setTotalLikesCount(likesData ? likesData.length : 0);
+
+      // 5. Follows Count
       const exactFollowersCount = await reconcileFollowerCount(user.id);
       setFollowersCount(exactFollowersCount);
 
-      // 5. Đang Theo Dõi (Following count)
-      const followingQuery = query(collection(db, 'follows'), where('followerId', '==', user.id));
-      const followingSnap = await getDocs(followingQuery);
-      const followingCreatorIds = new Set<string>();
-      followingSnap.docs.forEach(d => {
-        const data = d.data();
-        const targetId = data.targetCreatorId || data.creatorId;
-        if (targetId && targetId !== user.id) {
-          followingCreatorIds.add(targetId);
-        }
-      });
-      setFollowingCount(followingCreatorIds.size);
+      const { count: followingCountData } = await supabase
+        .from('follows')
+        .select('creatorId', { count: 'exact', head: true })
+        .eq('followerId', user.id);
+        
+      setFollowingCount(followingCountData || 0);
 
       // 6. Fetch User Appeals
-      const appealsQuery = query(collection(db, 'appeals'), where('userId', '==', user.id));
-      const appealsSnap = await getDocs(appealsQuery);
-      setMyAppeals(appealsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const { data: appealsData } = await supabase
+        .from('appeals')
+        .select('*')
+        .eq('userId', user.id);
+        
+      if (appealsData) {
+        setMyAppeals(appealsData);
+      }
 
     } catch (err) {
       console.error("Failed to load user profile data:", err);
@@ -307,8 +278,7 @@ export default function Profile() {
     }
 
     try {
-      const charRef = doc(db, 'characters', char.id);
-      await updateDoc(charRef, { pinned: !char.pinned });
+      await supabase.from('characters').update({ pinned: !char.pinned }).eq('id', char.id);
       toast.success(char.pinned ? "Đã bỏ ghim Character." : "Đã ghim Character lên đầu trang!");
       loadUserData();
     } catch (err) {
@@ -319,8 +289,7 @@ export default function Profile() {
   // Handle Pin / Unpin Prompt
   const handleTogglePinPrompt = async (p: PromptItem) => {
     try {
-      const pRef = doc(db, 'prompts', p.id);
-      await updateDoc(pRef, { pinned: !p.pinned });
+      await supabase.from('prompts').update({ pinned: !p.pinned }).eq('id', p.id);
       toast.success(p.pinned ? "Đã bỏ ghim Prompt." : "Đã ghim Prompt!");
       loadUserData();
     } catch (err) {
@@ -335,8 +304,7 @@ export default function Profile() {
 
   const executeDeleteCharacter = async (charId: string) => {
     try {
-      const charRef = doc(db, 'characters', charId);
-      await deleteDoc(charRef);
+      await supabase.from('characters').delete().eq('id', charId);
       toast.success("Đã xóa hoàn toàn Character khỏi hệ thống.");
       loadUserData();
     } catch (err) {
@@ -358,26 +326,24 @@ export default function Profile() {
     setIsFollowModalOpen(true);
     setLoadingFollows(true);
     try {
-      const q = query(collection(db, 'follows'), where('targetCreatorId', '==', user.id));
-      const snap = await getDocs(q);
-      const q2 = query(collection(db, 'follows'), where('creatorId', '==', user.id));
-      const snap2 = await getDocs(q2);
+      const { data: followData } = await supabase
+        .from('follows')
+        .select('followerId')
+        .eq('creatorId', user.id);
 
-      const allDocs = [...snap.docs, ...snap2.docs];
-      const seen = new Set<string>();
-      const usersList: any[] = [];
-
-      for (const d of allDocs) {
-        const followerId = d.data().followerId;
-        if (!followerId || followerId === user.id || seen.has(followerId)) continue;
-        seen.add(followerId);
-
-        const uDoc = await getDoc(doc(db, 'users', followerId));
-        if (uDoc.exists()) {
-          usersList.push({ id: uDoc.id, ...uDoc.data() });
+      if (followData && followData.length > 0) {
+        const followerIds = followData.map(f => f.followerId);
+        const { data: usersData } = await supabase
+          .from('users')
+          .select('*')
+          .in('id', followerIds);
+          
+        if (usersData) {
+          setFollowModalUsers(usersData);
         }
+      } else {
+        setFollowModalUsers([]);
       }
-      setFollowModalUsers(usersList);
     } catch (e) {
       console.error(e);
     } finally {
@@ -391,22 +357,24 @@ export default function Profile() {
     setIsFollowModalOpen(true);
     setLoadingFollows(true);
     try {
-      const q = query(collection(db, 'follows'), where('followerId', '==', user.id));
-      const snap = await getDocs(q);
-      const seen = new Set<string>();
-      const usersList: any[] = [];
+      const { data: followData } = await supabase
+        .from('follows')
+        .select('creatorId')
+        .eq('followerId', user.id);
 
-      for (const d of snap.docs) {
-        const creatorId = d.data().targetCreatorId || d.data().creatorId;
-        if (!creatorId || creatorId === user.id || seen.has(creatorId)) continue;
-        seen.add(creatorId);
-
-        const uDoc = await getDoc(doc(db, 'users', creatorId));
-        if (uDoc.exists()) {
-          usersList.push({ id: uDoc.id, ...uDoc.data() });
+      if (followData && followData.length > 0) {
+        const creatorIds = followData.map(f => f.creatorId);
+        const { data: usersData } = await supabase
+          .from('users')
+          .select('*')
+          .in('id', creatorIds);
+          
+        if (usersData) {
+          setFollowModalUsers(usersData);
         }
+      } else {
+        setFollowModalUsers([]);
       }
-      setFollowModalUsers(usersList);
     } catch (e) {
       console.error(e);
     } finally {
@@ -418,20 +386,13 @@ export default function Profile() {
   const handleUnlikeCharacterFromProfile = async (charId: string) => {
     if (!user?.id) return;
     try {
-      const q1 = query(collection(db, 'character_likes'), where('userId', '==', user.id), where('characterId', '==', charId));
-      const snap1 = await getDocs(q1);
-      for (const d of snap1.docs) {
-        await deleteDoc(doc(db, 'character_likes', d.id));
+      await supabase.from('character_likes').delete().match({ userId: user.id, characterId: charId });
+      
+      // Update character likes count
+      const { data: charData } = await supabase.from('characters').select('likesCount').eq('id', charId).single();
+      if (charData) {
+        await supabase.from('characters').update({ likesCount: Math.max(0, (charData.likesCount || 1) - 1) }).eq('id', charId);
       }
-
-      const q2 = query(collection(db, 'likes'), where('userId', '==', user.id), where('characterId', '==', charId));
-      const snap2 = await getDocs(q2);
-      for (const d of snap2.docs) {
-        await deleteDoc(doc(db, 'likes', d.id));
-      }
-
-      const charRef = doc(db, 'characters', charId);
-      await updateDoc(charRef, { likesCount: increment(-1) });
 
       toast.success("Đã bỏ thích Character.");
       loadUserData();
@@ -445,26 +406,19 @@ export default function Profile() {
   const handleRemoveBookmarkFromProfile = async (targetId: string, targetType: 'CHARACTER' | 'PROMPT') => {
     if (!user?.id) return;
     try {
-      const q = query(collection(db, 'bookmarks'), where('userId', '==', user.id));
-      const snap = await getDocs(q);
-
-      for (const d of snap.docs) {
-        const data = d.data();
-        const tId = data.targetId || data.characterId || data.promptId;
-        const tType = data.targetType || (data.characterId ? 'CHARACTER' : data.promptId ? 'PROMPT' : null);
-
-        if (tId === targetId && tType === targetType) {
-          await deleteDoc(doc(db, 'bookmarks', d.id));
-        }
-      }
+      await supabase.from('bookmarks').delete().match({ userId: user.id, targetId: targetId, targetType: targetType });
 
       if (targetType === 'CHARACTER') {
-        const charRef = doc(db, 'characters', targetId);
-        await updateDoc(charRef, { savesCount: increment(-1) });
+        const { data: charData } = await supabase.from('characters').select('savesCount').eq('id', targetId).single();
+        if (charData) {
+          await supabase.from('characters').update({ savesCount: Math.max(0, (charData.savesCount || 1) - 1) }).eq('id', targetId);
+        }
         toast.success("Đã bỏ lưu Character.");
       } else {
-        const promptRef = doc(db, 'prompts', targetId);
-        await updateDoc(promptRef, { savesCount: increment(-1) });
+        const { data: promptData } = await supabase.from('prompts').select('savesCount').eq('id', targetId).single();
+        if (promptData) {
+          await supabase.from('prompts').update({ savesCount: Math.max(0, (promptData.savesCount || 1) - 1) }).eq('id', targetId);
+        }
         toast.success("Đã bỏ lưu Prompt.");
       }
 
@@ -690,7 +644,7 @@ export default function Profile() {
         </div>
       )}
 
-      {/* Actions: Create Character & Create Prompt Buttons (Mục tạo nhân vật & Prompt) */}
+      {/* Actions: Create Character & Create Prompt Buttons */}
       <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-2">
           {user.creatorStatus ? (
