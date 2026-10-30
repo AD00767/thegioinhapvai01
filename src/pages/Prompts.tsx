@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   PenTool, Search, Plus, Sparkles, Filter, RefreshCw
 } from 'lucide-react';
-import { collection, query, getDocs, orderBy, where, doc, deleteDoc, limit } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Xóa Firebase, import Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useSeo } from '../hooks/useSeo';
 import { PromptItem } from '../types';
@@ -50,18 +50,22 @@ export default function Prompts() {
   const fetchPrompts = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'prompts'), orderBy('createdAt', 'desc'), limit(60));
-      const snap = await getDocs(q);
-      const list: PromptItem[] = [];
+      // Chuyển đổi sang Supabase Query
+      const { data, error } = await supabase
+        .from('prompts')
+        .select('*')
+        .is('deletedAt', null)
+        .is('isHidden', false)
+        .order('createdAt', { ascending: false })
+        .limit(60);
 
-      snap.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        if (!data.deletedAt && !data.isHidden) {
-          list.push({ id: docSnap.id, ...data } as PromptItem);
-        }
-      });
+      if (error) {
+        throw error;
+      }
 
-      setPrompts(list);
+      if (data) {
+        setPrompts(data as PromptItem[]);
+      }
     } catch (err) {
       console.error("Lỗi khi tải danh sách Prompt:", err);
       toast.error("Không thể tải danh sách Prompt.");
@@ -74,7 +78,6 @@ export default function Prompts() {
     fetchPrompts();
   }, []);
 
-  // Collect all unique tags
   const allTags = Array.from(
     new Set(prompts.flatMap(p => p.tags || []))
   ).filter(Boolean);
@@ -110,11 +113,10 @@ export default function Prompts() {
     }
   };
 
-  // Filter & Sort
   const filteredPrompts = prompts.filter(p => {
     const term = searchTerm.trim();
     const matchesSearch = !term || matchesItemFields(
-      [p.name, p.title, p.purpose, p.content, p.authorName, p.tags, p.numericId, p.id],
+      [p.name, p.title, p.purpose, p.content, p.authorName, p.tags?.join(' '), p.numericId, p.id],
       term
     );
 
@@ -144,7 +146,6 @@ export default function Prompts() {
           </p>
         </div>
 
-        {/* Nút tạo bài viết (Tạo Prompt) */}
         <div>
           {user ? (
             <button
@@ -171,7 +172,6 @@ export default function Prompts() {
 
       {/* Search & Filter Bar */}
       <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
-        {/* Search Bar */}
         <form onSubmit={handleSearchSubmit} className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400" />
           <input
@@ -183,7 +183,6 @@ export default function Prompts() {
           />
         </form>
 
-        {/* Sort selector */}
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-xs text-neutral-400 font-medium hidden sm:inline">Sắp xếp:</span>
           <select
