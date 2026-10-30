@@ -4,10 +4,8 @@ import {
   Bell, Plus, Search, Send, User, CheckCircle2, ShieldCheck, 
   X, Eye, Edit3, Sparkles, Clock, AlertCircle, FileText, Check, Users
 } from 'lucide-react';
-import { 
-  collection, query, getDocs, doc, addDoc, orderBy, where, serverTimestamp 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import toast from 'react-hot-toast';
 import ReactMarkdown from 'react-markdown';
@@ -61,30 +59,34 @@ export default function AdminSystemNotifications() {
   const fetchSystemNotifications = async () => {
     setLoading(true);
     try {
-      const q = query(
-        collection(db, 'notifications'),
-        where('isSystem', '==', true),
-        orderBy('createdAt', 'desc')
-      );
-      const snap = await getDocs(q);
-      const items = snap.docs.map(d => ({
-        id: d.id,
-        ...d.data()
-      })) as SystemNotifRecord[];
+      // 1. Dùng try-catch để lấy notif system
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('isSystem', true)
+        .order('createdAt', { ascending: false });
+
+      if (error) throw error;
+      
+      let items = (data as SystemNotifRecord[]) || [];
+      
+      // Nếu rỗng, thử filter thêm các loại SYSTEM
+      if (items.length === 0) {
+         const { data: fbData } = await supabase
+          .from('notifications')
+          .select('*')
+          .in('type', ['SYSTEM', 'SYSTEM_BROADCAST'])
+          .order('createdAt', { ascending: false });
+          
+         if (fbData) {
+            items = fbData as SystemNotifRecord[];
+         }
+      }
+
       setNotifList(items);
     } catch (err) {
       console.error("Error fetching system notifications:", err);
-      // Fallback query if index or compound query is pending
-      try {
-        const qFallback = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'));
-        const snapFB = await getDocs(qFallback);
-        const filtered = snapFB.docs
-          .map(d => ({ id: d.id, ...d.data() } as unknown as SystemNotifRecord))
-          .filter(n => n.isSystem || n.type === 'SYSTEM' || n.type === 'SYSTEM_BROADCAST');
-        setNotifList(filtered);
-      } catch (fbErr) {
-        console.error("Fallback fetch system notifications error:", fbErr);
-      }
+      toast.error("Lỗi khi tải thông báo.");
     } finally {
       setLoading(false);
     }
@@ -106,9 +108,14 @@ export default function AdminSystemNotifications() {
   const fetchAllUsers = async () => {
     setLoadingUsers(true);
     try {
-      const q = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
-      const snap = await getDocs(q);
-      setAllUsers(snap.docs.map(d => ({ id: d.id, ...d.data() }) as CreatorItem));
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('createdAt', { ascending: false })
+        .limit(500); // Limit to avoid crashing browser
+
+      if (error) throw error;
+      if (data) setAllUsers(data as CreatorItem[]);
     } catch (err) {
       console.error("Error fetching users for target selection:", err);
     } finally {
@@ -174,6 +181,7 @@ export default function AdminSystemNotifications() {
       const recipientId = isBroadcast ? 'ALL' : selectedMember!.id;
       const recipientName = isBroadcast ? 'Toàn bộ thành viên' : selectedMember!.displayName;
       const recipientNumericId = isBroadcast ? '' : (selectedMember!.numericId || selectedMember!.id);
+      const timestamp = new Date().toISOString();
 
       const notifData = {
         type: isBroadcast ? 'SYSTEM_BROADCAST' : 'SYSTEM',
@@ -190,13 +198,13 @@ export default function AdminSystemNotifications() {
         markdownContent: content.trim(),
         read: false,
         readBy: [],
-        createdAt: serverTimestamp()
+        createdAt: timestamp
       };
 
-      await addDoc(collection(db, 'notifications'), notifData);
+      await supabase.from('notifications').insert(notifData);
 
       // Audit Log
-      await addDoc(collection(db, 'audit_logs'), {
+      await supabase.from('audit_logs').insert({
         executorId: currentUser.id,
         executorName: currentUser.displayName || 'Admin',
         executorRole: currentUser.role || 'ADMIN',
@@ -204,7 +212,7 @@ export default function AdminSystemNotifications() {
         targetId: recipientId,
         targetType: isBroadcast ? 'ALL_MEMBERS' : 'USER',
         details: `Đã phát thông báo hệ thống: "${title.trim()}" cho ${recipientName}`,
-        createdAt: serverTimestamp()
+        createdAt: timestamp
       });
 
       toast.success("Đã gửi thông báo hệ thống thành công!");
@@ -311,9 +319,9 @@ export default function AdminSystemNotifications() {
                 <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800 font-medium">
                   {notifList.map((notif) => {
                     const isBroadcast = notif.isSystemBroadcast || notif.recipientId === 'ALL';
-                    const createdAtFormatted = notif.createdAt?.toDate 
-                      ? notif.createdAt.toDate().toLocaleString('vi-VN') 
-                      : new Date(notif.createdAt || 0).toLocaleString('vi-VN');
+                    const createdAtFormatted = notif.createdAt 
+                      ? new Date(notif.createdAt).toLocaleString('vi-VN') 
+                      : 'N/A';
 
                     return (
                       <tr key={notif.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-800/30 transition-colors">
@@ -504,7 +512,7 @@ export default function AdminSystemNotifications() {
                         )}
                       </div>
                     ) : (
-                      /* Confirm Selected Member Box (REQUIRED: Avatar + Display Name + Numeric ID) */
+                      /* Confirm Selected Member Box */
                       <div className="p-4 bg-amber-500/10 border border-amber-500/40 rounded-2xl flex items-center justify-between gap-4 animate-in fade-in duration-200">
                         <div className="flex items-center gap-3.5 min-w-0">
                           <img
@@ -597,14 +605,7 @@ export default function AdminSystemNotifications() {
                     rows={6}
                     value={content}
                     onChange={e => setContent(e.target.value)}
-                    placeholder="Nhập nội dung thông báo bằng Markdown...
-Ví dụ:
-# Thông Báo Mới
-Chào bạn, **Thế giới nhập vai_AD** vừa cập nhật tính năng mới:
-- *Tính năng AI Search*
-- *Phản hồi yêu cầu hỗ trợ*
-
-Xem thêm chi tiết tại [Trang chủ](/home)."
+                    placeholder="Nhập nội dung thông báo bằng Markdown...&#10;Ví dụ:&#10;# Thông Báo Mới&#10;Chào bạn, **Thế giới nhập vai_AD** vừa cập nhật tính năng mới:&#10;- *Tính năng AI Search*&#10;- *Phản hồi yêu cầu hỗ trợ*&#10;&#10;Xem thêm chi tiết tại [Trang chủ](/home)."
                     className="w-full p-4 bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl text-xs font-mono font-medium text-neutral-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500 leading-relaxed"
                   />
                 ) : (
