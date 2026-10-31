@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, ShieldAlert, Upload, FileText } from 'lucide-react';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import toast from 'react-hot-toast';
 import CaptchaModal from './CaptchaModal';
@@ -65,8 +65,10 @@ export default function AppealModal({
     if (!user) return;
     setSubmitting(true);
     try {
-      // 1. Create appeal document in 'appeals' collection
-      await addDoc(collection(db, 'appeals'), {
+      const timestamp = new Date().toISOString();
+
+      // 1. Create appeal document in 'appeals' table
+      await supabase.from('appeals').insert({
         userId: user.id,
         userName: user.displayName,
         userEmail: user.email,
@@ -77,29 +79,37 @@ export default function AppealModal({
         description: description.trim(),
         proofImage: proofBase64 || null,
         status: 'PENDING', // PENDING | REVIEWING | RESOLVED | REJECTED | DISMISSED
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        createdAt: timestamp,
+        updatedAt: timestamp
       });
 
       // 2. Record activity log
-      await addDoc(collection(db, 'activity_logs'), {
+      await supabase.from('activity_logs').insert({
         userId: user.id,
         userEmail: user.email,
         userName: user.displayName,
         action: 'SUBMIT_APPEAL',
         details: `Đã gửi yêu cầu kháng nghị đối với ${targetType}: ${targetName}`,
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
       // 3. Trigger notification for Admin/Moderators
-      await addDoc(collection(db, 'notifications'), {
-        userId: 'ADMIN',
-        type: 'APPEAL',
-        title: 'Yêu cầu kháng nghị mới (Appeal)',
-        body: `${user.displayName} đã gửi kháng nghị cho ${targetType}: "${targetName}" với lý do: ${reason}`,
-        read: false,
-        createdAt: serverTimestamp()
-      });
+      // Lấy tất cả user có role là ADMIN để gửi thông báo
+      const { data: admins } = await supabase.from('users').select('id').eq('role', 'ADMIN');
+      
+      if (admins && admins.length > 0) {
+        for (const admin of admins) {
+          await supabase.from('notifications').insert({
+            userId: admin.id,
+            recipientId: admin.id,
+            type: 'APPEAL',
+            title: 'Yêu cầu kháng nghị mới (Appeal)',
+            message: `${user.displayName} đã gửi kháng nghị cho ${targetType}: "${targetName}" với lý do: ${reason}`,
+            read: false,
+            createdAt: timestamp
+          });
+        }
+      }
 
       toast.success('Gửi kháng nghị thành công! Ban quản trị sẽ xem xét trong thời gian sớm nhất.');
       onClose();
