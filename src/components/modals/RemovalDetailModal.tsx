@@ -2,10 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   X, ShieldAlert, Clock, CheckCircle2, XCircle, AlertCircle, Send, FileText, ExternalLink 
 } from 'lucide-react';
-import { 
-  collection, query, where, getDocs, addDoc, doc, updateDoc, getDoc 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import toast from 'react-hot-toast';
 import { AppealItem } from '../../types';
@@ -77,13 +75,13 @@ export default function RemovalDetailModal({
           'COMMENT': 'comments'
         };
         const collName = collectionMap[targetType] || 'characters';
-        const targetSnap = await getDoc(doc(db, collName, targetId));
-        if (targetSnap.exists()) {
-          const d = targetSnap.data();
-          name = d.name || d.title || d.message || name || 'Nội dung';
-          reason = d.removalReason || reason || 'Vi phạm tiêu chuẩn cộng đồng';
-          details = d.removalDetails || details || 'Nội dung chứa hình ảnh hoặc ngôn từ không phù hợp.';
-          time = d.removalTime || d.deletedAt || time || new Date().toISOString();
+        
+        const { data: targetSnap } = await supabase.from(collName).select('*').eq('id', targetId).single();
+        if (targetSnap) {
+          name = targetSnap.name || targetSnap.title || targetSnap.message || name || 'Nội dung';
+          reason = targetSnap.removalReason || reason || 'Vi phạm tiêu chuẩn cộng đồng';
+          details = targetSnap.removalDetails || details || 'Nội dung chứa hình ảnh hoặc ngôn từ không phù hợp.';
+          time = targetSnap.removalTime || targetSnap.deletedAt || time || new Date().toISOString();
         }
       }
 
@@ -95,16 +93,16 @@ export default function RemovalDetailModal({
       });
 
       // 2. Fetch user's appeal for this target if exists
-      const appealsQuery = query(
-        collection(db, 'appeals'),
-        where('userId', '==', user?.id),
-        where('targetId', '==', targetId)
-      );
-      const appealSnap = await getDocs(appealsQuery);
-      if (!appealSnap.empty) {
-        const docs = appealSnap.docs.map(d => ({ id: d.id, ...d.data() } as AppealItem));
-        docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        setAppeal(docs[0]);
+      const { data: appealData } = await supabase
+        .from('appeals')
+        .select('*')
+        .eq('userId', user?.id)
+        .eq('targetId', targetId)
+        .order('createdAt', { ascending: false })
+        .limit(1);
+        
+      if (appealData && appealData.length > 0) {
+        setAppeal(appealData[0] as AppealItem);
         setShowAppealForm(false);
       } else {
         setAppeal(null);
@@ -128,6 +126,7 @@ export default function RemovalDetailModal({
 
     setIsSubmitting(true);
     try {
+      const timestamp = new Date().toISOString();
       const appealData = {
         userId: user.id,
         userName: user.displayName || 'Thành viên',
@@ -141,12 +140,15 @@ export default function RemovalDetailModal({
         reason: appealReason.trim(),
         proofImageUrl: proofImageUrl.trim() || null,
         status: 'PENDING',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        createdAt: timestamp,
+        updatedAt: timestamp
       };
 
-      const docRef = await addDoc(collection(db, 'appeals'), appealData);
-      const newAppealItem = { id: docRef.id, ...appealData } as AppealItem;
+      const { data: newDoc, error } = await supabase.from('appeals').insert(appealData).select().single();
+      
+      if (error) throw error;
+      
+      const newAppealItem = newDoc as AppealItem;
 
       // Update target document's appealStatus
       if (targetType !== 'ACCOUNT') {
@@ -158,14 +160,10 @@ export default function RemovalDetailModal({
         };
         const collName = collectionMap[targetType];
         if (collName) {
-          await updateDoc(doc(db, collName, targetId), {
-            appealStatus: 'PENDING'
-          }).catch(() => {});
+          await supabase.from(collName).update({ appealStatus: 'PENDING' }).eq('id', targetId).catch(() => {});
         }
       } else {
-        await updateDoc(doc(db, 'users', user.id), {
-          appealStatus: 'PENDING'
-        }).catch(() => {});
+        await supabase.from('users').update({ appealStatus: 'PENDING' }).eq('id', user.id).catch(() => {});
       }
 
       toast.success("Đã gửi đơn kháng nghị thành công! Ban quản trị sẽ xem xét sớm nhất.");
@@ -411,13 +409,6 @@ export default function RemovalDetailModal({
               )}
             </>
           )}
-        </div>
-
-        {/* Footer */}
-        <div className="p-4 bg-neutral-100 dark:bg-neutral-900 border-t border-neutral-200 dark:border-neutral-800 text-center shrink-0">
-          <p className="text-[10px] text-neutral-400 font-semibold">
-            Chỉ bạn và Ban Quản Trị mới có thể xem chi tiết thông tin kháng nghị này.
-          </p>
         </div>
       </div>
     </div>
