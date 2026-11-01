@@ -4,14 +4,14 @@ import {
   Globe, MessageSquare, Heart, ThumbsUp, Smile, Frown, Angry, Sparkles, 
   Trash2, Edit3, CornerDownRight, Send, ShieldAlert, ArrowRight, Check, X, MoreVertical, Flag
 } from 'lucide-react';
-// Bỏ Firebase, dùng Supabase
-import { supabase } from '../lib/supabase';
-import { useAuthStore } from '../store/useAuthStore';
-import CommentSection from './comments/CommentSection';
-import ReportModal from './ReportModal';
-import DeleteConfirmModal from './DeleteConfirmModal';
-import UserBadge from './UserBadge';
-import { getValidAvatar, DEFAULT_AVATAR } from '../lib/avatar';
+// Đã sửa đường dẫn import supabase cho đúng cấu trúc:
+import { supabase } from '../../lib/supabase';
+import { useAuthStore } from '../../store/useAuthStore';
+import CommentSection from '../comments/CommentSection';
+import ReportModal from '../ReportModal';
+import DeleteConfirmModal from '../DeleteConfirmModal';
+import UserBadge from '../UserBadge';
+import { getValidAvatar, DEFAULT_AVATAR } from '../../lib/avatar';
 import toast from 'react-hot-toast';
 
 export interface FeedbackItem {
@@ -108,6 +108,7 @@ export default function PublicFeedbackCard({
       }
 
       const totalCount = Object.keys(updatedReactions).length;
+      const timestamp = new Date().toISOString();
 
       await supabase.from('feedbacks').update({
         reactions: updatedReactions,
@@ -125,7 +126,7 @@ export default function PublicFeedbackCard({
           message: `${user.displayName} đã thả cảm xúc ${REACTION_ICONS[reactionType]?.emoji || ''} vào Feedback của bạn.`,
           link: '/feedbacks',
           read: false,
-          createdAt: new Date().toISOString()
+          createdAt: timestamp
         });
       }
 
@@ -394,9 +395,9 @@ export default function PublicFeedbackCard({
 
       {/* Timestamp */}
       <div className="text-[10px] text-neutral-400 font-medium">
-        {feedback.createdAt?.toDate 
-          ? feedback.createdAt.toDate().toLocaleString('vi-VN') 
-          : (feedback.createdAt ? new Date(feedback.createdAt).toLocaleString('vi-VN') : 'Mới đăng')}
+        {feedback.createdAt 
+          ? new Date(feedback.createdAt).toLocaleString('vi-VN') 
+          : 'Mới đăng'}
       </div>
 
       {/* Reactions Display Bar & Counts */}
@@ -440,6 +441,7 @@ export default function PublicFeedbackCard({
             <span>{myReaction ? REACTION_ICONS[myReaction]?.label : 'Thả cảm xúc'}</span>
           </button>
 
+          {/* Emoji Selector Popup */}
           {showReactionPicker && (
             <div className="absolute left-0 bottom-full mb-2 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-2 shadow-xl flex items-center gap-2 z-20 animate-scale-up">
               {Object.entries(REACTION_ICONS).map(([key, item]) => (
@@ -456,6 +458,7 @@ export default function PublicFeedbackCard({
           )}
         </div>
 
+        {/* Toggle Comments Button */}
         <button
           onClick={() => setShowComments(!showComments)}
           className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-xs font-bold text-neutral-600 dark:text-neutral-300 transition-colors"
@@ -465,6 +468,7 @@ export default function PublicFeedbackCard({
         </button>
       </div>
 
+      {/* Comments Section */}
       {showComments && (
         <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 animate-fade-in">
           <CommentSection
