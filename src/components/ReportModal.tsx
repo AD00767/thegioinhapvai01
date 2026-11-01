@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, AlertTriangle, Upload, FileText, CheckCircle2 } from 'lucide-react';
-import { collection, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { enforceActivityCheck } from '../lib/restrictions';
 import toast from 'react-hot-toast';
@@ -57,27 +57,26 @@ export default function ReportModal({ isOpen, onClose, targetType, targetId, tar
     setSubmitting(true);
     try {
       // Check duplicate report by same user for same targetId within last 5 minutes
-      const reportsRef = collection(db, 'reports');
-      const q = query(
-        reportsRef,
-        where('reporterId', '==', user.id),
-        where('targetId', '==', targetId)
-      );
+      const { data: reports } = await supabase
+        .from('reports')
+        .select('createdAt')
+        .eq('reporterId', user.id)
+        .eq('targetId', targetId);
       
-      const querySnapshot = await getDocs(q);
       const now = new Date().getTime();
       let hasRecentReport = false;
 
-      querySnapshot.forEach((doc) => {
-        const reportData = doc.data();
-        if (reportData.createdAt) {
-          const reportTime = new Date(reportData.createdAt).getTime();
-          // Check if report is within last 5 minutes (300,000 ms)
-          if (now - reportTime < 5 * 60 * 1000) {
-            hasRecentReport = true;
+      if (reports && reports.length > 0) {
+        reports.forEach((doc) => {
+          if (doc.createdAt) {
+            const reportTime = new Date(doc.createdAt).getTime();
+            // Check if report is within last 5 minutes (300,000 ms)
+            if (now - reportTime < 5 * 60 * 1000) {
+              hasRecentReport = true;
+            }
           }
-        }
-      });
+        });
+      }
 
       if (hasRecentReport) {
         toast.error('Bạn đã báo cáo nội dung này gần đây. Vui lòng chờ ban quản trị xử lý.');
@@ -98,8 +97,10 @@ export default function ReportModal({ isOpen, onClose, targetType, targetId, tar
     if (!user) return;
     setSubmitting(true);
     try {
+      const timestamp = new Date().toISOString();
+
       // 1. Submit report
-      await addDoc(collection(db, 'reports'), {
+      await supabase.from('reports').insert({
         targetType,
         targetId,
         targetName,
@@ -109,30 +110,36 @@ export default function ReportModal({ isOpen, onClose, targetType, targetId, tar
         reporterId: user.id,
         reporterName: user.displayName,
         reporterEmail: user.email,
-        status: 'PENDING', // 'PENDING' | 'PROCESSING' | 'RESOLVED' | 'REJECTED'
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        status: 'PENDING',
+        createdAt: timestamp,
+        updatedAt: timestamp
       });
 
       // 2. Add activity log
-      await addDoc(collection(db, 'activity_logs'), {
+      await supabase.from('activity_logs').insert({
         userId: user.id,
         userEmail: user.email,
         userName: user.displayName,
         action: 'REPORT_SUBMIT',
         details: `Đã gửi báo cáo cho ${targetType}: ${targetName}`,
-        createdAt: new Date().toISOString()
+        createdAt: timestamp
       });
 
       // 3. Admin Notification
-      await addDoc(collection(db, 'notifications'), {
-        userId: 'ADMIN', // Admin-wide notice
-        type: 'REPORT',
-        title: 'Báo cáo vi phạm mới',
-        body: `${user.displayName} đã báo cáo ${targetType}: "${targetName}" với lý do: ${reason}`,
-        read: false,
-        createdAt: serverTimestamp()
-      });
+      const { data: admins } = await supabase.from('users').select('id').eq('role', 'ADMIN');
+      if (admins && admins.length > 0) {
+        for (const admin of admins) {
+          await supabase.from('notifications').insert({
+            userId: admin.id,
+            recipientId: admin.id,
+            type: 'REPORT',
+            title: 'Báo cáo vi phạm mới',
+            message: `${user.displayName} đã báo cáo ${targetType}: "${targetName}" với lý do: ${reason}`,
+            read: false,
+            createdAt: timestamp
+          });
+        }
+      }
 
       toast.success('Gửi báo cáo thành công. Ban quản trị sẽ xử lý sớm nhất.');
       onClose();
