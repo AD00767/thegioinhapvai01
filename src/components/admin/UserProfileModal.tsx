@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Shield, UserCheck, Calendar, Mail, AlertTriangle, ExternalLink, Sparkles, FileText, Lock } from 'lucide-react';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+import { supabase } from '../../lib/supabase';
 import { getValidAvatar } from '../../lib/avatar';
 import DisplayId from '../DisplayId';
 
@@ -27,9 +26,14 @@ export default function UserProfileModal({ userId, isOpen, onClose }: UserProfil
     if (!userId) return;
     setLoading(true);
     try {
-      const snap = await getDoc(doc(db, 'users', userId));
-      if (snap.exists()) {
-        setUserData({ id: snap.id, ...snap.data() });
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+        
+      if (data) {
+        setUserData(data);
       } else {
         setUserData(null);
       }
