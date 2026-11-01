@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, CheckCircle2, XCircle, Clock, UserCheck, AlertCircle } from 'lucide-react';
-import { collection, getDocs, doc, updateDoc, addDoc, query, where } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { getValidAvatar } from '../../lib/avatar';
 import toast from 'react-hot-toast';
 
@@ -24,13 +24,13 @@ export default function AdminApprovalSection() {
   const fetchPendingRequests = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'creator_requests'), where('status', '==', 'PENDING'));
-      const snap = await getDocs(q);
-      const list: CreatorRequest[] = [];
-      snap.docs.forEach(d => {
-        list.push({ id: d.id, ...d.data() } as CreatorRequest);
-      });
-      setRequests(list);
+      const { data, error } = await supabase
+        .from('creator_requests')
+        .select('*')
+        .eq('status', 'PENDING');
+        
+      if (error) throw error;
+      setRequests((data as CreatorRequest[]) || []);
     } catch (err) {
       console.error("Failed to fetch creator requests:", err);
     } finally {
@@ -45,25 +45,29 @@ export default function AdminApprovalSection() {
   const handleApprove = async (req: CreatorRequest) => {
     setProcessingId(req.id);
     try {
-      // 1. Update creator_requests doc
-      await updateDoc(doc(db, 'creator_requests', req.id), {
-        status: 'APPROVED',
-        updatedAt: new Date().toISOString()
-      });
+      const timestamp = new Date().toISOString();
 
-      // 2. Update user doc -> creatorStatus = true
-      await updateDoc(doc(db, 'users', req.userId), {
+      // 1. Update creator_requests table
+      await supabase.from('creator_requests').update({
+        status: 'APPROVED',
+        updatedAt: timestamp
+      }).eq('id', req.id);
+
+      // 2. Update users table -> creatorStatus = true
+      await supabase.from('users').update({
         creatorStatus: true,
         creatorRequestStatus: 'APPROVED'
-      });
+      }).eq('id', req.userId);
 
       // 3. Send notification to user
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
+        recipientId: req.userId,
         userId: req.userId,
         title: 'Yêu cầu Creator được phê duyệt',
-        content: 'Chúc mừng! Quản trị viên đã phê duyệt yêu cầu trở thành Creator của bạn. Bạn đã có quyền đăng Character lên hệ thống!',
-        isRead: false,
-        createdAt: new Date().toISOString()
+        message: 'Chúc mừng! Quản trị viên đã phê duyệt yêu cầu trở thành Creator của bạn. Bạn đã có quyền đăng Character lên hệ thống!',
+        type: 'SYSTEM',
+        read: false,
+        createdAt: timestamp
       });
 
       toast.success(`Đã phê duyệt ${req.userDisplayName} trở thành Creator!`);
@@ -79,24 +83,28 @@ export default function AdminApprovalSection() {
   const handleReject = async (req: CreatorRequest) => {
     setProcessingId(req.id);
     try {
-      // 1. Update creator_requests doc
-      await updateDoc(doc(db, 'creator_requests', req.id), {
-        status: 'REJECTED',
-        updatedAt: new Date().toISOString()
-      });
+      const timestamp = new Date().toISOString();
 
-      // 2. Update user doc -> creatorRequestStatus = REJECTED
-      await updateDoc(doc(db, 'users', req.userId), {
+      // 1. Update creator_requests table
+      await supabase.from('creator_requests').update({
+        status: 'REJECTED',
+        updatedAt: timestamp
+      }).eq('id', req.id);
+
+      // 2. Update users table -> creatorRequestStatus = REJECTED
+      await supabase.from('users').update({
         creatorRequestStatus: 'REJECTED'
-      });
+      }).eq('id', req.userId);
 
       // 3. Send notification to user
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
+        recipientId: req.userId,
         userId: req.userId,
         title: 'Yêu cầu Creator bị từ chối',
-        content: 'Yêu cầu trở thành Creator của bạn đã bị từ chối bởi Quản trị viên.',
-        isRead: false,
-        createdAt: new Date().toISOString()
+        message: 'Yêu cầu trở thành Creator của bạn đã bị từ chối bởi Quản trị viên.',
+        type: 'SYSTEM',
+        read: false,
+        createdAt: timestamp
       });
 
       toast.success(`Đã từ chối yêu cầu của ${req.userDisplayName}.`);
