@@ -1,5 +1,4 @@
-import { db } from './firebase';
-import { collection, query, where, getDocs, doc, getDoc, limit } from 'firebase/firestore';
+import { supabase } from './supabase';
 import { CharacterItem, PromptItem, CreatorItem } from '../types';
 
 export interface IdSearchResult {
@@ -92,7 +91,7 @@ export function matchesItemFields(fields: (string | undefined | null | string[])
     if (matchesSearchText(str, queryText)) return true;
   }
 
-  // 2. Check across combined string for multi-token cross-field queries (e.g. keyword 1 in name, keyword 2 in tags)
+  // 2. Check across combined string for multi-token cross-field queries
   const combined = flattenedStrings.join(' ');
   if (matchesSearchText(combined, queryText)) return true;
 
@@ -209,7 +208,7 @@ export function parseIdQuery(queryText: string): IdSearchResult {
 }
 
 /**
- * Looks up a parsed ID in Firebase Firestore across all searchable collections
+ * Looks up a parsed ID in Supabase across all searchable tables
  * and resolves the actual public record object.
  */
 const idLookupCache = new Map<string, { data: ExactIdLookupResult | null; timestamp: number }>();
@@ -235,18 +234,20 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
       if ((typeHint === 'creator' || typeHint === 'user') && col.name !== 'users') continue;
     }
 
+    let docSnap: any = null;
+    
     // Try query by numericId
-    const q = query(collection(db, col.name), where('numericId', '==', numericId), limit(1));
-    const snap = await getDocs(q);
-    let docSnap: any = !snap.empty ? snap.docs[0] : null;
+    const { data: numData } = await supabase.from(col.name).select('*').eq('numericId', numericId).limit(1).single();
+    if (numData) {
+      docSnap = numData;
+    }
 
     // Fallback: direct doc id lookup if numericId query returned empty
     if (!docSnap) {
       try {
-        const directRef = doc(db, col.name, numericId);
-        const directSnap = await getDoc(directRef);
-        if (directSnap.exists()) {
-          docSnap = directSnap;
+        const { data: directData } = await supabase.from(col.name).select('*').eq('id', numericId).limit(1).single();
+        if (directData) {
+          docSnap = directData;
         }
       } catch (err) {
         // ignore direct doc id error
@@ -254,14 +255,14 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
     }
 
     if (docSnap) {
-      const docData = docSnap.data();
+      const docData = docSnap;
 
       // Check if soft deleted or hidden
       if (docData.deletedAt || docData.isHidden) {
         const deletedResult: ExactIdLookupResult = {
           found: false,
           type: col.type,
-          id: docSnap.id,
+          id: docData.id,
           numericId,
           path: '',
           error: "ID không tồn tại hoặc đã bị xóa khỏi hệ thống."
@@ -275,7 +276,7 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
           const adminResult: ExactIdLookupResult = {
             found: false,
             type: col.type,
-            id: docSnap.id,
+            id: docData.id,
             numericId,
             path: '',
             error: "ID không tồn tại hoặc đã bị xóa khỏi hệ thống."
@@ -286,11 +287,11 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
 
         const isCreator = !!docData.creatorStatus;
         const targetType = isCreator ? 'creator' : 'user';
-        const numId = docData.numericId || numericId || docSnap.id;
+        const numId = docData.numericId || numericId || docData.id;
         const path = isCreator ? `/creator/${numId}` : `/user/${numId}`;
 
         const publicResult: CreatorItem = {
-          id: docSnap.id,
+          id: docData.id,
           numericId: docData.numericId,
           displayName: docData.displayName || "Người dùng",
           avatar: docData.avatar,
@@ -306,7 +307,7 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
         const finalResult: ExactIdLookupResult = {
           found: true,
           type: targetType,
-          id: docSnap.id,
+          id: docData.id,
           numericId: docData.numericId || numericId,
           path,
           result: publicResult
@@ -315,7 +316,7 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
         return finalResult;
       } else if (col.name === 'characters') {
         const publicResult: CharacterItem = {
-          id: docSnap.id,
+          id: docData.id,
           numericId: docData.numericId,
           name: docData.name,
           avatar: docData.avatar,
@@ -333,11 +334,11 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
           createdAt: docData.createdAt
         };
 
-        const numId = docData.numericId || numericId || docSnap.id;
+        const numId = docData.numericId || numericId || docData.id;
         const finalResult: ExactIdLookupResult = {
           found: true,
           type: 'character',
-          id: docSnap.id,
+          id: docData.id,
           numericId: docData.numericId || numericId,
           path: `/character/${numId}`,
           result: publicResult
@@ -346,7 +347,7 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
         return finalResult;
       } else if (col.name === 'prompts') {
         const publicResult: PromptItem = {
-          id: docSnap.id,
+          id: docData.id,
           numericId: docData.numericId,
           title: docData.name || docData.title,
           name: docData.name || docData.title,
@@ -360,11 +361,11 @@ export async function lookupIdInFirebase(numericId: string, typeHint?: string): 
           createdAt: docData.createdAt
         };
 
-        const numId = docData.numericId || numericId || docSnap.id;
+        const numId = docData.numericId || numericId || docData.id;
         const finalResult: ExactIdLookupResult = {
           found: true,
           type: 'prompt',
-          id: docSnap.id,
+          id: docData.id,
           numericId: docData.numericId || numericId,
           path: `/prompt/${numId}`,
           result: publicResult
@@ -418,9 +419,8 @@ async function getCachedCharacters(): Promise<CachedDoc[]> {
   if (charactersCache && (now - charactersCache.timestamp < COLLECTION_CACHE_TTL)) {
     return charactersCache.docs;
   }
-  const q = query(collection(db, 'characters'), limit(100));
-  const snap = await getDocs(q);
-  const docs = snap.docs.map(docSnap => ({ id: docSnap.id, data: docSnap.data() }));
+  const { data } = await supabase.from('characters').select('*').limit(100);
+  const docs = (data || []).map(d => ({ id: d.id, data: d }));
   charactersCache = { docs, timestamp: now };
   return docs;
 }
@@ -430,9 +430,8 @@ async function getCachedPrompts(): Promise<CachedDoc[]> {
   if (promptsCache && (now - promptsCache.timestamp < COLLECTION_CACHE_TTL)) {
     return promptsCache.docs;
   }
-  const q = query(collection(db, 'prompts'), limit(100));
-  const snap = await getDocs(q);
-  const docs = snap.docs.map(docSnap => ({ id: docSnap.id, data: docSnap.data() }));
+  const { data } = await supabase.from('prompts').select('*').limit(100);
+  const docs = (data || []).map(d => ({ id: d.id, data: d }));
   promptsCache = { docs, timestamp: now };
   return docs;
 }
@@ -442,9 +441,8 @@ async function getCachedUsers(): Promise<CachedDoc[]> {
   if (usersCache && (now - usersCache.timestamp < COLLECTION_CACHE_TTL)) {
     return usersCache.docs;
   }
-  const q = query(collection(db, 'users'), limit(100));
-  const snap = await getDocs(q);
-  const docs = snap.docs.map(docSnap => ({ id: docSnap.id, data: docSnap.data() }));
+  const { data } = await supabase.from('users').select('*').limit(100);
+  const docs = (data || []).map(d => ({ id: d.id, data: d }));
   usersCache = { docs, timestamp: now };
   return docs;
 }
@@ -468,13 +466,7 @@ export function clearSearchCache() {
 
 /**
  * Standard Search (Search Thường):
- * Performs a comprehensive search directly across real Firestore collections (Characters, Prompts, Creators).
- * Matches across all searchable fields:
- * - Character: Name, Slogan, Plot, Tags, Gender, Creator Name, Link, NumericId, ID
- * - Prompt: Title/Name, Purpose, Content, Tags, Author Name, NumericId, ID
- * - Creator: Display Name, Bio, Role, NumericId, ID
- * 
- * Returns ALL matching results without arbitrary truncation.
+ * Performs a comprehensive search directly across real Supabase tables.
  */
 export async function searchAllCollections(
   queryText: string,
@@ -569,7 +561,7 @@ export async function searchAllCollections(
 
         // Strict Tags filter if explicitly requested via UI filter
         if (options.strictTags && options.tags && options.tags.length > 0) {
-          const hasTag = options.tags.some(t => charItem.tags.some(ct => matchesSearchText(ct, t)));
+          const hasTag = options.tags.some(t => charItem.tags.some((ct: string) => matchesSearchText(ct, t)));
           if (!hasTag) return;
         }
 
@@ -605,7 +597,7 @@ export async function searchAllCollections(
           }
           if (options.tags && options.tags.length > 0) {
             for (const optTag of options.tags) {
-              if (charItem.tags.some(ct => matchesSearchText(ct, optTag))) {
+              if (charItem.tags.some((ct: string) => matchesSearchText(ct, optTag))) {
                 score += 40;
               }
             }
@@ -647,7 +639,7 @@ export async function searchAllCollections(
 
         // Strict Tags filter if requested
         if (options.strictTags && options.tags && options.tags.length > 0) {
-          const hasTag = options.tags.some(t => promptItem.tags.some(pt => matchesSearchText(pt, t)));
+          const hasTag = options.tags.some(t => promptItem.tags.some((pt: string) => matchesSearchText(pt, t)));
           if (!hasTag) return;
         }
 
@@ -678,7 +670,7 @@ export async function searchAllCollections(
 
           if (options.tags && options.tags.length > 0) {
             for (const optTag of options.tags) {
-              if (promptItem.tags.some(pt => matchesSearchText(pt, optTag))) {
+              if (promptItem.tags.some((pt: string) => matchesSearchText(pt, optTag))) {
                 score += 40;
               }
             }
@@ -764,8 +756,8 @@ export async function searchAllCollections(
           return getPopularScore(b.item) - getPopularScore(a.item);
         }
         if (sortBy === 'newest') {
-          const timeA = a.item.createdAt?.seconds || 0;
-          const timeB = b.item.createdAt?.seconds || 0;
+          const timeA = new Date(a.item.createdAt || 0).getTime();
+          const timeB = new Date(b.item.createdAt || 0).getTime();
           return timeB - timeA;
         }
         return b.score - a.score;
