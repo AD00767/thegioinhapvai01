@@ -3,14 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { 
   Lock, Mail, CornerDownRight, Send, Trash2, Shield, Heart, ArrowRight, MessageSquare 
 } from 'lucide-react';
-// Bỏ Firebase, dùng Supabase
-import { supabase } from '../lib/supabase';
-import { useAuthStore } from '../store/useAuthStore';
-import UserBadge from './UserBadge';
+// Đã sửa đường dẫn import supabase cho đúng cấu trúc:
+import { supabase } from '../../lib/supabase';
+import { useAuthStore } from '../../store/useAuthStore';
+import UserBadge from '../UserBadge';
 import { FeedbackItem } from './PublicFeedbackCard';
-import { getValidAvatar, DEFAULT_AVATAR } from '../lib/avatar';
-import { enforceActivityCheck } from '../lib/restrictions';
-import DeleteConfirmModal from './DeleteConfirmModal';
+import { getValidAvatar, DEFAULT_AVATAR } from '../../lib/avatar';
+import { enforceActivityCheck } from '../../lib/restrictions';
+import DeleteConfirmModal from '../DeleteConfirmModal';
 import toast from 'react-hot-toast';
 
 interface PrivateReply {
@@ -362,9 +362,9 @@ export default function PrivateFeedbackCard({
 
       {/* Date */}
       <div className="text-[10px] text-neutral-400 font-medium">
-        Gửi lúc: {feedback.createdAt?.toDate 
-          ? feedback.createdAt.toDate().toLocaleString('vi-VN') 
-          : (feedback.createdAt ? new Date(feedback.createdAt).toLocaleString('vi-VN') : 'Mới đây')}
+        Gửi lúc: {feedback.createdAt 
+          ? new Date(feedback.createdAt).toLocaleString('vi-VN') 
+          : 'Mới đây'}
       </div>
 
       {/* Actions Bar: Reaction & Reply */}
