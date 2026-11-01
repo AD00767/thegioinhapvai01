@@ -23,8 +23,8 @@ import {
   Check,
   Activity
 } from 'lucide-react';
-import { doc, updateDoc, setDoc, getDoc } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { BADGE_DEFINITIONS, evaluateUserBadges, BadgeId } from '../../lib/badges';
 import { CustomSocialLink } from '../../types';
@@ -37,7 +37,7 @@ interface EditProfileModalProps {
   onSaveSuccess: () => void;
 }
 
-// Helper function to resize and compress avatar image client-side to prevent exceeding Firestore 1MB document limit
+// Helper function to resize and compress avatar image client-side to prevent exceeding size limit
 const resizeAndCompressAvatar = (file: File, maxWidth = 400, maxHeight = 400, quality = 0.82): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -126,18 +126,23 @@ export default function EditProfileModal({ isOpen, onClose, onSaveSuccess }: Edi
       setDiscord(user.socialLinks?.discord || '');
       setCustomLinks(user.customLinks || []);
 
-      // Check existing creator request in Firestore
+      // Check existing creator request in Supabase
       const checkRequest = async () => {
         try {
-          const reqRef = doc(db, 'creator_requests', user.id);
-          const reqSnap = await getDoc(reqRef);
-          if (reqSnap.exists()) {
-            const data = reqSnap.data();
+          const { data, error } = await supabase
+            .from('creator_requests')
+            .select('*')
+            .eq('userId', user.id)
+            .order('createdAt', { ascending: false })
+            .limit(1)
+            .single();
+
+          if (data) {
             setRequestStatus(data.status || 'IDLE');
             if (data.reason) setRequestReason(data.reason);
-            if (data.adminNote) setAdminNote(data.adminNote);
+            if (data.moderatorNote || data.adminNote) setAdminNote(data.moderatorNote || data.adminNote);
           } else if (user.creatorRequestStatus) {
-            setRequestStatus(user.creatorRequestStatus);
+            setRequestStatus(user.creatorRequestStatus as any);
           } else {
             setRequestStatus('IDLE');
           }
@@ -167,7 +172,6 @@ export default function EditProfileModal({ isOpen, onClose, onSaveSuccess }: Edi
     }
 
     try {
-      // Resize and compress client-side to ensure small footprint (< 50KB) and prevent Firestore 1MB document limit
       const optimizedBase64 = await resizeAndCompressAvatar(file, 400, 400, 0.82);
       setAvatar(optimizedBase64);
       toast.success("Tải ảnh đại diện thành công!");
@@ -216,8 +220,8 @@ export default function EditProfileModal({ isOpen, onClose, onSaveSuccess }: Edi
         updatedAt: new Date().toISOString()
       };
 
-      await setDoc(doc(db, 'creator_requests', user.id), reqData);
-      await setDoc(doc(db, 'users', user.id), { creatorRequestStatus: 'PENDING' }, { merge: true });
+      await supabase.from('creator_requests').upsert(reqData);
+      await supabase.from('users').update({ creatorRequestStatus: 'PENDING' }).eq('id', user.id);
 
       setRequestStatus('PENDING');
       toast.success("Đã gửi yêu cầu trở thành Creator tới Quản trị viên (Admin)!");
@@ -268,8 +272,7 @@ export default function EditProfileModal({ isOpen, onClose, onSaveSuccess }: Edi
         updatedAt: new Date().toISOString()
       };
 
-      const userRef = doc(db, 'users', user.id);
-      await setDoc(userRef, updatedData, { merge: true });
+      await supabase.from('users').update(updatedData).eq('id', user.id);
 
       // Update local state in Zustand store
       setAuth(firebaseUser, { ...user, ...updatedData });
