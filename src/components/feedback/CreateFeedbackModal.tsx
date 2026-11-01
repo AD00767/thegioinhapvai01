@@ -3,8 +3,8 @@ import {
   X, Lock, Globe, UserCheck, Send, AlertCircle, Search, Upload, Trash2, 
   Image as ImageIcon, Check, ShieldCheck, User, Sparkles, BookOpen
 } from 'lucide-react';
-import { collection, getDocs, addDoc, serverTimestamp } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { getValidAvatar } from '../../lib/avatar';
 import { enforceActivityCheck } from '../../lib/restrictions';
@@ -33,7 +33,7 @@ export default function CreateFeedbackModal({
   onSuccess,
   defaultRecipientId
 }: CreateFeedbackModalProps) {
-  const { user, firebaseUser } = useAuthStore();
+  const { user } = useAuthStore();
 
   const [usersList, setUsersList] = useState<UserOption[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -54,20 +54,28 @@ export default function CreateFeedbackModal({
     const fetchUsers = async () => {
       setLoadingUsers(true);
       try {
-        const snap = await getDocs(collection(db, 'users'));
+        const { data, error } = await supabase
+          .from('users')
+          .select('id, numericId, displayName, name, avatar, photoURL, creatorStatus')
+          .is('deletedAt', null)
+          .limit(200);
+
+        if (error) throw error;
+
         const list: UserOption[] = [];
-        snap.docs.forEach(docSnap => {
-          const uData = docSnap.data();
-          if (docSnap.id !== user?.id && !uData.deletedAt) {
-            list.push({
-              id: docSnap.id,
-              numericId: uData.numericId || docSnap.id,
-              displayName: uData.displayName || 'Thành viên',
-              avatar: getValidAvatar(uData.avatar),
-              creatorStatus: uData.creatorStatus
-            });
-          }
-        });
+        if (data) {
+          data.forEach((uData: any) => {
+            if (uData.id !== user?.id) {
+              list.push({
+                id: uData.id,
+                numericId: uData.numericId || uData.id,
+                displayName: uData.displayName || uData.name || 'Thành viên',
+                avatar: getValidAvatar(uData.avatar || uData.photoURL),
+                creatorStatus: !!uData.creatorStatus
+              });
+            }
+          });
+        }
         setUsersList(list);
 
         if (defaultRecipientId) {
@@ -108,7 +116,7 @@ export default function CreateFeedbackModal({
       const term = searchTrim.toLowerCase();
       filteredUsers = usersList.filter(u => 
         u.displayName.toLowerCase().includes(term) ||
-        u.numericId.includes(term)
+        (u.numericId && u.numericId.includes(term))
       );
     }
   }
@@ -182,7 +190,8 @@ export default function CreateFeedbackModal({
 
     setSubmitting(true);
     try {
-      const currentSenderId = user.id || firebaseUser?.uid;
+      const currentSenderId = user.id;
+      const timestamp = new Date().toISOString();
       const feedbackData = {
         senderId: currentSenderId,
         senderName: user.displayName,
@@ -197,28 +206,28 @@ export default function CreateFeedbackModal({
         reactions: {},
         reactionsCount: 0,
         commentsCount: 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        deletedAt: null
+        createdAt: timestamp,
+        updatedAt: timestamp
       };
 
-      const fbRef = await addDoc(collection(db, 'feedbacks'), feedbackData);
+      const { data: newDoc, error } = await supabase.from('feedbacks').insert(feedbackData).select('id').single();
+      if (error) throw error;
 
       // Create notification for recipient
-      await addDoc(collection(db, 'notifications'), {
+      await supabase.from('notifications').insert({
         userId: selectedRecipient.id,
         recipientId: selectedRecipient.id,
         senderId: user.id,
         senderName: user.displayName,
         senderAvatar: user.avatar || '',
         type: 'FEEDBACK',
-        targetId: fbRef.id,
+        targetId: newDoc.id,
         targetType: 'FEEDBACK',
         title: mode === 'PUBLIC' ? 'Có Feedback công khai mới' : 'Có Feedback riêng tư mới',
         message: `${user.displayName} vừa gửi cho bạn một Feedback ${mode === 'PUBLIC' ? 'công khai' : 'riêng tư'}.`,
         link: '/feedbacks',
         read: false,
-        createdAt: serverTimestamp()
+        createdAt: timestamp
       });
 
       toast.success(`Đã gửi Feedback ${mode === 'PUBLIC' ? 'công khai' : 'riêng tư'} thành công!`);
