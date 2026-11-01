@@ -1,22 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
-  Heart, 
-  Bookmark, 
-  Eye, 
-  ExternalLink, 
-  Sparkles, 
-  User as UserIcon, 
-  Tag, 
-  MoreVertical, 
-  Pin, 
-  Edit3, 
-  Trash2, 
-  Share2, 
-  Flag 
+  Heart, Bookmark, Eye, ExternalLink, Sparkles, User as UserIcon, Tag, 
+  MoreVertical, Pin, Edit3, Trash2, Share2, Flag 
 } from 'lucide-react';
-import { doc, updateDoc, increment, collection, addDoc, query, where, getDocs, deleteDoc, serverTimestamp } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useUserInteractions } from '../context/UserInteractionsContext';
 import { CharacterItem } from '../types';
@@ -24,7 +13,6 @@ import ReportModal from './ReportModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import ShareModal from './ShareModal';
 import DisplayId from './DisplayId';
-import { buildCharacterUrl } from '../lib/urls';
 import toast from 'react-hot-toast';
 
 interface CharacterCardProps {
@@ -104,37 +92,41 @@ export default function CharacterCard({
     }
 
     try {
-      const q = query(
-        collection(db, 'character_likes'),
-        where('userId', '==', user.id),
-        where('characterId', '==', character.id)
-      );
-      const snap = await getDocs(q);
-      const charRef = doc(db, 'characters', character.id);
+      const { data: snap } = await supabase
+        .from('character_likes')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('characterId', character.id);
 
-      if (!snap.empty) {
-        for (const d of snap.docs) {
-          await deleteDoc(doc(db, 'character_likes', d.id));
+      if (snap && snap.length > 0) {
+        for (const d of snap) {
+          await supabase.from('character_likes').delete().eq('id', d.id);
         }
-        await updateDoc(charRef, { likesCount: increment(-1) });
+        const newLikes = Math.max(0, likesCount - 1);
+        await supabase.from('characters').update({ likesCount: newLikes }).eq('id', character.id);
+        
         setIsLiked(false);
-        setLikedState(character.id, false);
-        setLikesCount(prev => Math.max(0, prev - 1));
+        setLikedState('CHARACTER', character.id, false);
+        setLikesCount(newLikes);
       } else {
-        await addDoc(collection(db, 'character_likes'), {
+        await supabase.from('character_likes').insert({
           userId: user.id,
           characterId: character.id,
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
-        await updateDoc(charRef, { likesCount: increment(1) });
+        
+        const newLikes = likesCount + 1;
+        await supabase.from('characters').update({ likesCount: newLikes }).eq('id', character.id);
+        
         setIsLiked(true);
-        setLikedState(character.id, true);
-        setLikesCount(prev => prev + 1);
+        setLikedState('CHARACTER', character.id, true);
+        setLikesCount(newLikes);
         toast.success("Đã thích Character!");
 
         if (character.creatorId && character.creatorId !== user.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             recipientId: character.creatorId,
+            userId: character.creatorId, // Giữ thêm để tương thích nếu cần
             senderId: user.id,
             senderName: user.displayName || 'Người dùng',
             senderAvatar: user.avatar || '',
@@ -163,39 +155,43 @@ export default function CharacterCard({
     }
 
     try {
-      const q = query(
-        collection(db, 'bookmarks'),
-        where('userId', '==', user.id),
-        where('targetId', '==', character.id),
-        where('targetType', '==', 'CHARACTER')
-      );
-      const snap = await getDocs(q);
-      const charRef = doc(db, 'characters', character.id);
+      const { data: snap } = await supabase
+        .from('bookmarks')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('targetId', character.id)
+        .eq('targetType', 'CHARACTER');
 
-      if (!snap.empty) {
-        for (const d of snap.docs) {
-          await deleteDoc(doc(db, 'bookmarks', d.id));
+      if (snap && snap.length > 0) {
+        for (const d of snap) {
+          await supabase.from('bookmarks').delete().eq('id', d.id);
         }
-        await updateDoc(charRef, { savesCount: increment(-1) });
+        const newSaves = Math.max(0, savesCount - 1);
+        await supabase.from('characters').update({ savesCount: newSaves }).eq('id', character.id);
+        
         setIsBookmarked(false);
-        setBookmarkState(character.id, 'CHARACTER', false);
-        setSavesCount(prev => Math.max(0, prev - 1));
+        setBookmarkState('CHARACTER', character.id, false);
+        setSavesCount(newSaves);
       } else {
-        await addDoc(collection(db, 'bookmarks'), {
+        await supabase.from('bookmarks').insert({
           userId: user.id,
           targetId: character.id,
           targetType: 'CHARACTER',
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
-        await updateDoc(charRef, { savesCount: increment(1) });
+        
+        const newSaves = savesCount + 1;
+        await supabase.from('characters').update({ savesCount: newSaves }).eq('id', character.id);
+        
         setIsBookmarked(true);
-        setBookmarkState(character.id, 'CHARACTER', true);
-        setSavesCount(prev => prev + 1);
+        setBookmarkState('CHARACTER', character.id, true);
+        setSavesCount(newSaves);
         toast.success("Đã lưu Character vào bộ sưu tập!");
 
         if (character.creatorId && character.creatorId !== user.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             recipientId: character.creatorId,
+            userId: character.creatorId,
             senderId: user.id,
             senderName: user.displayName || 'Người dùng',
             senderAvatar: user.avatar || '',
@@ -232,9 +228,8 @@ export default function CharacterCard({
       return;
     }
     try {
-      const charRef = doc(db, 'characters', character.id);
       const newPinned = !character.pinned;
-      await updateDoc(charRef, { pinned: newPinned });
+      await supabase.from('characters').update({ pinned: newPinned }).eq('id', character.id);
       toast.success(newPinned ? "Đã ghim Character!" : "Đã bỏ ghim Character!");
       if (onUpdate) onUpdate();
     } catch (err) {
@@ -250,7 +245,7 @@ export default function CharacterCard({
       return;
     }
     try {
-      await deleteDoc(doc(db, 'characters', character.id));
+      await supabase.from('characters').delete().eq('id', character.id);
       toast.success("Đã xóa Character!");
       setIsDeleteOpen(false);
       if (onUpdate) onUpdate();
@@ -287,11 +282,10 @@ export default function CharacterCard({
       <div 
         onClick={handleOpenDetail}
         className={`group cursor-pointer bg-white dark:bg-neutral-900 border rounded-2xl p-4 md:p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between relative overflow-hidden ${
-          character.pinned 
-            ? 'border-amber-500/50 dark:border-amber-500/40 bg-gradient-to-b from-amber-500/5 to-transparent' 
-            : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700'
-        }`}
-      >
+        character.pinned 
+          ? 'border-amber-500/50 dark:border-amber-500/40 bg-gradient-to-b from-amber-500/5 to-transparent' 
+          : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700'
+      }`}>
         <div>
           {/* Header Row: Avatar, Title, ID, Author & 3-Dots Menu */}
           <div className="flex items-start justify-between gap-3 mb-3">
