@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { HelpCircle, Mail, Clock, CheckCircle2, X, MessageSquare, ShieldCheck, Paperclip } from 'lucide-react';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { NotificationItem } from '../../pages/Notifications';
 
 interface SupportReplyModalProps {
@@ -28,10 +28,16 @@ export default function SupportReplyModal({
     const fetchTicket = async () => {
       setLoading(true);
       try {
-        const docRef = doc(db, 'contact_forms', effectiveTicketId);
-        const snap = await getDoc(docRef);
-        if (snap.exists()) {
-          setTicketData({ id: snap.id, ...snap.data() });
+        const { data, error } = await supabase
+          .from('contact_forms')
+          .select('*')
+          .eq('id', effectiveTicketId)
+          .single();
+          
+        if (error) throw error;
+        
+        if (data) {
+          setTicketData(data);
         } else {
           setTicketData(null);
         }
@@ -53,12 +59,11 @@ export default function SupportReplyModal({
   const userContent = ticketData?.content || ticketData?.message || (notification as any)?.ticketContent || '';
   const adminReply = ticketData?.moderatorReply || (notification as any)?.moderatorReply || notification?.message || '';
   const attachmentName = ticketData?.attachmentName;
-  const attachmentData = ticketData?.attachmentData;
   const createdAtFormatted = ticketData?.createdAt
-    ? (ticketData.createdAt.toDate ? ticketData.createdAt.toDate().toLocaleString('vi-VN') : new Date(ticketData.createdAt).toLocaleString('vi-VN'))
-    : (notification?.createdAt?.toDate ? notification.createdAt.toDate().toLocaleString('vi-VN') : new Date(notification?.createdAt || 0).toLocaleString('vi-VN'));
+    ? new Date(ticketData.createdAt).toLocaleString('vi-VN')
+    : new Date(notification?.createdAt || 0).toLocaleString('vi-VN');
   const resolvedAtFormatted = ticketData?.resolvedAt
-    ? (ticketData.resolvedAt.toDate ? ticketData.resolvedAt.toDate().toLocaleString('vi-VN') : new Date(ticketData.resolvedAt).toLocaleString('vi-VN'))
+    ? new Date(ticketData.resolvedAt).toLocaleString('vi-VN')
     : null;
 
   return (
@@ -157,7 +162,7 @@ export default function SupportReplyModal({
 
             {/* Close Action */}
             <div className="pt-2 text-right">
-              <button
+              <button 
                 type="button"
                 onClick={onClose}
                 className="px-6 py-2.5 bg-neutral-900 dark:bg-white text-white dark:text-black hover:bg-neutral-800 dark:hover:bg-neutral-100 rounded-2xl text-xs font-black uppercase tracking-wider transition-colors cursor-pointer shadow-md"
