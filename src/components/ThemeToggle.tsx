@@ -2,8 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Sun, Moon, Laptop, Check } from 'lucide-react';
 import { applyTheme, ThemeMode } from '../lib/themeFont';
 import { useAuthStore } from '../store/useAuthStore';
-import { doc, updateDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { supabase } from '../lib/supabase';
 import toast from 'react-hot-toast';
 
 export default function ThemeToggle() {
@@ -50,11 +49,9 @@ export default function ThemeToggle() {
 
     if (user?.id) {
       try {
-        await updateDoc(doc(db, 'users', user.id), {
-          themePreference: mode
-        });
+        await supabase.from('users').update({ themePreference: mode }).eq('id', user.id);
       } catch (err) {
-        console.error("Failed to save theme in Firestore:", err);
+        console.error("Failed to save theme in Supabase:", err);
       }
     }
   };
