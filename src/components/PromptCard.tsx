@@ -3,10 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { 
   Copy, Check, Bookmark, BookmarkCheck, Pin, Edit3, Trash2, User as UserIcon, Sparkles, MessageSquare, Flag, Share2
 } from 'lucide-react';
-import { 
-  doc, updateDoc, increment, collection, addDoc, query, where, getDocs, deleteDoc, serverTimestamp 
-} from 'firebase/firestore';
-import { db } from '../lib/firebase';
+// Bỏ Firebase, dùng Supabase
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 import { useUserInteractions } from '../context/UserInteractionsContext';
 import { PromptItem } from '../types';
@@ -60,12 +58,10 @@ export default function PromptCard({ prompt, onEdit, onDelete, onPin, isOwner }:
       setCopied(true);
       toast.success("Đã sao chép Prompt vào khay nhớ tạm!");
 
-      // Update Firestore copy count
-      const promptRef = doc(db, 'prompts', prompt.id);
-      await updateDoc(promptRef, {
-        copyCount: increment(1)
-      });
-      setCopyCount(prev => prev + 1);
+      // Update Supabase copy count
+      const newCopyCount = copyCount + 1;
+      await supabase.from('prompts').update({ copyCount: newCopyCount }).eq('id', prompt.id);
+      setCopyCount(newCopyCount);
 
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -75,7 +71,8 @@ export default function PromptCard({ prompt, onEdit, onDelete, onPin, isOwner }:
   };
 
   // Save / Bookmark Handler ("Nút lưu" & "Bộ đếm số lượt lưu")
-  const handleToggleSave = async () => {
+  const handleToggleSave = async (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (!user) {
       toast.error("Vui lòng đăng nhập để lưu Prompt này!");
       return;
@@ -83,48 +80,48 @@ export default function PromptCard({ prompt, onEdit, onDelete, onPin, isOwner }:
 
     setBookmarking(true);
     try {
-      const q = query(
-        collection(db, 'bookmarks'),
-        where('userId', '==', user.id),
-        where('targetId', '==', prompt.id),
-        where('targetType', '==', 'PROMPT')
-      );
-      const snap = await getDocs(q);
+      const { data: snap } = await supabase
+        .from('bookmarks')
+        .select('id')
+        .eq('userId', user.id)
+        .eq('targetId', prompt.id)
+        .eq('targetType', 'PROMPT');
 
-      const promptRef = doc(db, 'prompts', prompt.id);
-
-      if (!snap.empty) {
+      if (snap && snap.length > 0) {
         // Remove bookmark
-        for (const bDoc of snap.docs) {
-          await deleteDoc(doc(db, 'bookmarks', bDoc.id));
+        for (const bDoc of snap) {
+          await supabase.from('bookmarks').delete().eq('id', bDoc.id);
         }
-        await updateDoc(promptRef, {
-          savesCount: increment(-1)
-        });
+        
+        const newSaves = Math.max(0, savesCount - 1);
+        await supabase.from('prompts').update({ savesCount: newSaves }).eq('id', prompt.id);
+        
         setIsBookmarked(false);
-        setBookmarkState(prompt.id, 'PROMPT', false);
-        setSavesCount(prev => Math.max(0, prev - 1));
+        setBookmarkState('PROMPT', prompt.id, false);
+        setSavesCount(newSaves);
         toast.success("Đã bỏ lưu Prompt.");
       } else {
         // Add bookmark
-        await addDoc(collection(db, 'bookmarks'), {
+        await supabase.from('bookmarks').insert({
           userId: user.id,
           targetId: prompt.id,
           targetType: 'PROMPT',
-          createdAt: serverTimestamp()
+          createdAt: new Date().toISOString()
         });
-        await updateDoc(promptRef, {
-          savesCount: increment(1)
-        });
+        
+        const newSaves = savesCount + 1;
+        await supabase.from('prompts').update({ savesCount: newSaves }).eq('id', prompt.id);
+        
         setIsBookmarked(true);
-        setBookmarkState(prompt.id, 'PROMPT', true);
-        setSavesCount(prev => prev + 1);
+        setBookmarkState('PROMPT', prompt.id, true);
+        setSavesCount(newSaves);
         toast.success("Đã lưu Prompt vào bộ sưu tập!");
 
         // Gửi thông báo đến Tác giả Prompt
         if (prompt.authorId && prompt.authorId !== user.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             recipientId: prompt.authorId,
+            userId: prompt.authorId, // Giữ tương thích
             senderId: user.id,
             senderName: user.displayName || 'Người dùng',
             senderAvatar: user.avatar || '',
@@ -180,7 +177,10 @@ export default function PromptCard({ prompt, onEdit, onDelete, onPin, isOwner }:
             <div className="flex flex-wrap items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400">
               {prompt.authorId ? (
                 <div 
-                  onClick={() => navigate(`/creator/${prompt.authorId}`)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigate(`/creator/${prompt.authorId}`);
+                  }}
                   className="flex items-center gap-1.5 cursor-pointer hover:text-amber-600 dark:hover:text-amber-400 hover:underline"
                 >
                   <img 
@@ -303,7 +303,7 @@ export default function PromptCard({ prompt, onEdit, onDelete, onPin, isOwner }:
 
           {/* Nút lưu */}
           <button
-            onClick={(e) => { e.stopPropagation(); handleToggleSave(); }}
+            onClick={(e) => { e.stopPropagation(); handleToggleSave(e); }}
             disabled={bookmarking}
             className={`p-2 rounded-xl text-xs font-semibold border transition-all ${
               isBookmarked
