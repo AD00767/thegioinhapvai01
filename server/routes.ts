@@ -1,7 +1,8 @@
 import { Router } from "express";
-import { db, auth, FieldValue } from "./firebase";
 import { z } from "zod";
 import { GoogleGenAI } from "@google/genai";
+// Import Supabase client thay cho Firebase
+import { supabase } from "./supabase"; 
 
 const router = Router();
 const ai = new GoogleGenAI({
@@ -13,19 +14,39 @@ const ai = new GoogleGenAI({
   }
 });
 
-// Middleware to check authentication
-const requireAuth = (req: any, res: any, next: any) => {
-  if (!req.user) {
-    return res.status(401).json({ error: "Unauthorized" });
+// Middleware to check authentication using Supabase JWT
+const requireAuth = async (req: any, res: any, next: any) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: "Unauthorized: Missing Token" });
   }
-  next();
+
+  const token = authHeader.split('Bearer ')[1];
+  
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    
+    if (error || !user) {
+      return res.status(401).json({ error: "Unauthorized: Invalid Token" });
+    }
+    
+    req.user = user; // Supabase user object uses .id instead of .uid
+    next();
+  } catch (err) {
+    res.status(401).json({ error: "Unauthorized: Verification failed" });
+  }
 };
 
 const requireAdmin = async (req: any, res: any, next: any) => {
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
   try {
-    const userDoc = await db.collection("users").doc(req.user.uid).get();
-    if (!userDoc.exists || userDoc.data()?.role !== "ADMIN") {
+    const { data: userDoc } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", req.user.id)
+      .single();
+
+    if (!userDoc || userDoc.role !== "ADMIN") {
       return res.status(403).json({ error: "Forbidden" });
     }
     next();
@@ -37,8 +58,13 @@ const requireAdmin = async (req: any, res: any, next: any) => {
 const requireCreator = async (req: any, res: any, next: any) => {
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
   try {
-    const userDoc = await db.collection("users").doc(req.user.uid).get();
-    if (!userDoc.exists || userDoc.data()?.creatorStatus !== true) {
+    const { data: userDoc } = await supabase
+      .from("users")
+      .select("creatorStatus")
+      .eq("id", req.user.id)
+      .single();
+
+    if (!userDoc || userDoc.creatorStatus !== true) {
       return res.status(403).json({ error: "Forbidden - Creator status required" });
     }
     next();
@@ -48,68 +74,78 @@ const requireCreator = async (req: any, res: any, next: any) => {
 };
 
 // ==========================================
-// MIGRATION
+// MIGRATION (Adapted for Supabase)
 // ==========================================
 router.get("/migrate-ids", async (req: any, res) => {
   try {
     async function generateAdminUniqueId(objectType: string, objectReference: string): Promise<string> {
       let uniqueId = '';
       let isUnique = false;
+      
       while (!isUnique) {
         uniqueId = Math.floor(Math.random() * 1000000000).toString().padStart(9, '0');
-        const idRef = db.collection('global_ids').doc(uniqueId);
-        try {
-          await db.runTransaction(async (transaction) => {
-            const idDoc = await transaction.get(idRef);
-            if (!idDoc.exists) {
-              transaction.set(idRef, { 
-                numericId: uniqueId,
-                objectType: objectType,
-                objectReference: objectReference,
-                status: 'reserved',
-                createdAt: new Date().toISOString()
-              });
-              isUnique = true;
-            }
+        
+        // Trong PostgreSQL thực tế nên dùng Sequence, nhưng ở đây mô phỏng lại logic Firebase cũ của bạn
+        const { data: existingId } = await supabase.from('global_ids').select('numericId').eq('numericId', uniqueId).single();
+        
+        if (!existingId) {
+          const { error } = await supabase.from('global_ids').insert({
+            numericId: uniqueId,
+            objectType: objectType,
+            objectReference: objectReference,
+            status: 'reserved',
+            createdAt: new Date().toISOString()
           });
-          if (isUnique) {
-              await db.collection('audit_logs').add({
-                  action: 'ID_RESERVED',
-                  numericId: uniqueId,
-                  objectType: objectType,
-                  objectReference: objectReference,
-                  timestamp: new Date().toISOString(),
-                  systemAction: true
-              });
+
+          if (!error) {
+            isUnique = true;
+            await supabase.from('audit_logs').insert({
+              action: 'ID_RESERVED',
+              numericId: uniqueId,
+              objectType: objectType,
+              objectReference: objectReference,
+              createdAt: new Date().toISOString(),
+              systemAction: true
+            });
           }
-        } catch (e) {
-          console.warn("Collision, retrying...");
         }
       }
       return uniqueId;
     }
 
-    const usersSnap = await db.collection("users").get();
-    for (const docSnap of usersSnap.docs) {
-      if (!docSnap.data().numericId) {
-        const nid = await generateAdminUniqueId("user", docSnap.id);
-        await docSnap.ref.update({ numericId: nid });
+    // Migrate Users
+    console.log("Migrating users...");
+    const { data: users } = await supabase.from("users").select("id, numericId");
+    if (users) {
+      for (const u of users) {
+        if (!u.numericId) {
+          const nid = await generateAdminUniqueId("user", u.id);
+          await supabase.from("users").update({ numericId: nid }).eq("id", u.id);
+        }
       }
     }
 
-    const charSnap = await db.collection("characters").get();
-    for (const docSnap of charSnap.docs) {
-      if (!docSnap.data().numericId) {
-        const nid = await generateAdminUniqueId("character", docSnap.id);
-        await docSnap.ref.update({ numericId: nid });
+    // Migrate Characters
+    console.log("Migrating characters...");
+    const { data: chars } = await supabase.from("characters").select("id, numericId");
+    if (chars) {
+      for (const c of chars) {
+        if (!c.numericId) {
+          const nid = await generateAdminUniqueId("character", c.id);
+          await supabase.from("characters").update({ numericId: nid }).eq("id", c.id);
+        }
       }
     }
 
-    const promptSnap = await db.collection("prompts").get();
-    for (const docSnap of promptSnap.docs) {
-      if (!docSnap.data().numericId) {
-        const nid = await generateAdminUniqueId("prompt", docSnap.id);
-        await docSnap.ref.update({ numericId: nid });
+    // Migrate Prompts
+    console.log("Migrating prompts...");
+    const { data: prompts } = await supabase.from("prompts").select("id, numericId");
+    if (prompts) {
+      for (const p of prompts) {
+        if (!p.numericId) {
+          const nid = await generateAdminUniqueId("prompt", p.id);
+          await supabase.from("prompts").update({ numericId: nid }).eq("id", p.id);
+        }
       }
     }
 
@@ -124,39 +160,40 @@ router.get("/migrate-ids", async (req: any, res) => {
 // ==========================================
 router.post("/auth/login/google", requireAuth, async (req: any, res) => {
   try {
-    const uid = req.user.uid;
-    const userRef = db.collection("users").doc(uid);
-    const userDoc = await userRef.get();
+    const uid = req.user.id; // Supabase dùng id thay vì uid
+    const { data: userDoc } = await supabase.from("users").select("*").eq("id", uid).single();
 
-    if (!userDoc.exists) {
+    if (!userDoc) {
       // First time login
       const newUser = {
+        id: uid,
         email: req.user.email,
-        displayName: req.user.name || "User " + uid.substring(0, 5),
-        avatar: req.user.picture || "",
+        displayName: req.user.user_metadata?.full_name || req.user.user_metadata?.name || "User " + uid.substring(0, 5),
+        avatar: req.user.user_metadata?.avatar_url || req.user.user_metadata?.picture || "",
         bio: "",
         socialLinks: {},
         role: "USER",
         creatorStatus: false,
-        createdAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-        deletedAt: null
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
-      await userRef.set(newUser);
       
-      await db.collection("activity_logs").add({
+      await supabase.from("users").insert(newUser);
+      
+      await supabase.from("activity_logs").insert({
         userId: uid,
         action: "Account creation",
-        createdAt: FieldValue.serverTimestamp()
+        createdAt: new Date().toISOString()
       });
-      return res.json({ success: true, user: { id: uid, ...newUser } });
+      
+      return res.json({ success: true, user: newUser });
     } else {
-      await db.collection("activity_logs").add({
+      await supabase.from("activity_logs").insert({
         userId: uid,
         action: "Login",
-        createdAt: FieldValue.serverTimestamp()
+        createdAt: new Date().toISOString()
       });
-      return res.json({ success: true, user: { id: uid, ...userDoc.data() } });
+      return res.json({ success: true, user: userDoc });
     }
   } catch (error) {
     console.error(error);
@@ -166,9 +203,9 @@ router.post("/auth/login/google", requireAuth, async (req: any, res) => {
 
 router.get("/auth/me", requireAuth, async (req: any, res) => {
   try {
-    const userDoc = await db.collection("users").doc(req.user.uid).get();
-    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
-    res.json({ success: true, user: { id: userDoc.id, ...userDoc.data() } });
+    const { data: userDoc } = await supabase.from("users").select("*").eq("id", req.user.id).single();
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, user: userDoc });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
   }
@@ -187,10 +224,11 @@ router.patch("/users/me", requireAuth, async (req: any, res) => {
     });
     
     const data = schema.parse(req.body);
-    await db.collection("users").doc(req.user.uid).update({
+    
+    await supabase.from("users").update({
       ...data,
-      updatedAt: FieldValue.serverTimestamp()
-    });
+      updatedAt: new Date().toISOString()
+    }).eq("id", req.user.id);
     
     res.json({ success: true });
   } catch (err) {
@@ -203,8 +241,14 @@ router.patch("/users/me", requireAuth, async (req: any, res) => {
 // ==========================================
 router.get("/characters", async (req, res) => {
   try {
-    const snapshot = await db.collection("characters").where("deletedAt", "==", null).orderBy("createdAt", "desc").limit(20).get();
-    const characters = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const { data: characters, error } = await supabase
+      .from("characters")
+      .select("*")
+      .is("deletedAt", null)
+      .order("createdAt", { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
     res.json({ success: true, data: characters });
   } catch (err) {
     console.error("Failed to fetch characters", err);
@@ -224,40 +268,43 @@ router.post("/characters", requireCreator, async (req: any, res) => {
       tags: z.array(z.string().max(30)).max(6).optional()
     });
     const data = schema.parse(req.body);
+    const timestamp = new Date().toISOString();
     
     const charData = {
       ...data,
-      creatorId: req.user.uid,
-      viewCount: 0,
-      likeCount: 0,
-      saveCount: 0,
-      isPinned: false,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-      deletedAt: null
+      creatorId: req.user.id,
+      viewsCount: 0,
+      likesCount: 0,
+      savesCount: 0,
+      pinned: false,
+      createdAt: timestamp,
+      updatedAt: timestamp
     };
     
-    const docRef = await db.collection("characters").add(charData);
+    const { data: insertedChar, error } = await supabase.from("characters").insert(charData).select().single();
+    if (error) throw error;
     
-    // Process tags
+    // Process tags (upsert logically)
     if (data.tags) {
        for(const tag of data.tags) {
-          // just save them to tags collection if not exists, simplified
-          await db.collection("tags").doc(tag.toLowerCase()).set({ name: tag, usageCount: FieldValue.increment(1) }, { merge: true });
+          const lowerTag = tag.toLowerCase();
+          const { data: existingTag } = await supabase.from("tags").select("usageCount").eq("id", lowerTag).single();
+          if (existingTag) {
+            await supabase.from("tags").update({ usageCount: existingTag.usageCount + 1 }).eq("id", lowerTag);
+          } else {
+            await supabase.from("tags").insert({ id: lowerTag, name: tag, usageCount: 1 });
+          }
        }
     }
     
-    // Notify followers
-    // ... we can implement this later
-    
-    res.json({ success: true, data: { id: docRef.id, ...charData } });
+    res.json({ success: true, data: insertedChar });
   } catch (err: any) {
     res.status(400).json({ error: "Validation error", details: err.errors });
   }
 });
 
 // ==========================================
-// SEARCH & AI SEARCH
+// SEARCH & AI SEARCH (Unchanged mostly, just removes Firebase ties)
 // ==========================================
 router.post("/ai-search", async (req, res) => {
   try {
@@ -300,13 +347,12 @@ router.post("/ai-search", async (req, res) => {
             break;
           }
         } catch (err: any) {
-          // Model might be busy (503) or unavailable, try next candidate
           continue;
         }
       }
     }
 
-    // If Gemini models were unavailable or API key not present, use local semantic analyzer
+    // Fallback if Gemini models were unavailable or API key not present
     if (!criteria || typeof criteria !== "object") {
       const lower = rawQuery.toLowerCase();
       let type: 'character' | 'prompt' | 'creator' | 'all' = 'all';
@@ -327,7 +373,6 @@ router.post("/ai-search", async (req, res) => {
         gender = 'Nam';
       }
 
-      // Check common roleplay tags
       const commonTags = ['hiện đại', 'cổ đại', 'học đường', 'fantasy', 'kinh dị', 'trinh thám', 'anime', 'huyền huyễn', 'tổng tài', 'tiên hiệp', 'scifi', 'khoa học viễn tưởng', 'hài hước', 'tình cảm'];
       for (const ct of commonTags) {
         if (lower.includes(ct)) {
@@ -335,7 +380,6 @@ router.post("/ai-search", async (req, res) => {
         }
       }
 
-      // Filter words
       const stopWords = new Set(['tìm', 'kiếm', 'cho', 'tôi', 'những', 'các', 'một', 'nhân', 'vật', 'prompt', 'creator', 'và', 'là', 'về', 'trong', 'với', 'hãy']);
       const words = rawQuery
         .split(/[\s,.;:!?/\\-]+/)
