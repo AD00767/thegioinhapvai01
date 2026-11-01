@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { HelpCircle, Mail, Clock, CheckCircle2, X, MessageSquare, ShieldCheck, Paperclip } from 'lucide-react';
+import { HelpCircle, Clock, X, Paperclip, ShieldCheck } from 'lucide-react';
 // Bỏ Firebase, dùng Supabase
 import { supabase } from '../../lib/supabase';
 import { NotificationItem } from '../../pages/Notifications';
@@ -34,8 +34,6 @@ export default function SupportReplyModal({
           .eq('id', effectiveTicketId)
           .single();
           
-        if (error) throw error;
-        
         if (data) {
           setTicketData(data);
         } else {
@@ -53,15 +51,16 @@ export default function SupportReplyModal({
 
   if (!isOpen) return null;
 
-  // Fallback data if document fetch is still loading or unavailable
   const subject = ticketData?.subject || ticketData?.fullSubject || (notification as any)?.ticketSubject || notification?.title || 'Yêu cầu hỗ trợ';
   const category = ticketData?.category || 'Hỗ trợ';
   const userContent = ticketData?.content || ticketData?.message || (notification as any)?.ticketContent || '';
   const adminReply = ticketData?.moderatorReply || (notification as any)?.moderatorReply || notification?.message || '';
   const attachmentName = ticketData?.attachmentName;
+  
   const createdAtFormatted = ticketData?.createdAt
     ? new Date(ticketData.createdAt).toLocaleString('vi-VN')
     : new Date(notification?.createdAt || 0).toLocaleString('vi-VN');
+    
   const resolvedAtFormatted = ticketData?.resolvedAt
     ? new Date(ticketData.resolvedAt).toLocaleString('vi-VN')
     : null;
@@ -75,7 +74,6 @@ export default function SupportReplyModal({
         className="bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 rounded-[2.5rem] w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 sm:p-8 space-y-6 shadow-2xl relative border border-neutral-200 dark:border-neutral-800 animate-in zoom-in-95 duration-200"
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-neutral-200 dark:border-neutral-800 pb-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-amber-500/10 text-amber-500 flex items-center justify-center shrink-0">
@@ -103,7 +101,6 @@ export default function SupportReplyModal({
           </div>
         ) : (
           <div className="space-y-6">
-            {/* User Request Section */}
             <div className="p-5 bg-neutral-50 dark:bg-neutral-800/50 rounded-2xl border border-neutral-200/80 dark:border-neutral-700/80 space-y-3">
               <div className="flex items-center justify-between gap-2 border-b border-neutral-200 dark:border-neutral-700/60 pb-2.5">
                 <span className="text-[10px] font-black uppercase tracking-wider text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2.5 py-0.5 rounded-lg">
@@ -137,7 +134,6 @@ export default function SupportReplyModal({
               )}
             </div>
 
-            {/* Admin Response Section */}
             <div className="p-5 bg-emerald-500/10 dark:bg-emerald-500/15 border border-emerald-500/30 rounded-2xl space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-extrabold text-xs uppercase tracking-wider">
@@ -160,7 +156,6 @@ export default function SupportReplyModal({
               )}
             </div>
 
-            {/* Close Action */}
             <div className="pt-2 text-right">
               <button 
                 type="button"
