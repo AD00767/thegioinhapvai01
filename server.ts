@@ -2,13 +2,12 @@ import express from "express";
 import path from "path";
 import cors from "cors";
 import { createServer as createViteServer } from "vite";
-import { auth, db } from "./server/firebase";
-import apiRoutes from "./server/routes";
+import apiRoutes from "./server/routes"; // Đảm bảo trong routes cũng đã bỏ Firebase
 import rateLimit from "express-rate-limit";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   // Trust the first proxy in front of the server (needed for X-Forwarded-For)
   app.set("trust proxy", 1);
@@ -19,24 +18,20 @@ async function startServer() {
   // Security - Rate limiting
   const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
-    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-    validate: { default: false }, // Disable header validation checks to prevent proxy warnings
+    max: 100, // Limit each IP to 100 requests per 15 minutes
+    standardHeaders: true, 
+    legacyHeaders: false, 
+    validate: { default: false }, 
   });
   app.use("/api", limiter);
 
-  // Authentication Middleware
+  // Authentication Middleware (Đã gỡ Firebase - Nếu cần xác thực API, dùng Supabase JWT Verification ở đây)
   app.use(async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      const idToken = authHeader.split('Bearer ')[1];
-      try {
-        const decodedToken = await auth.verifyIdToken(idToken);
-        (req as any).user = decodedToken;
-      } catch (error) {
-        console.error("Error verifying token:", error);
-      }
+      const token = authHeader.split('Bearer ')[1];
+      // Tích hợp logic verify JWT của Supabase tại đây nếu API của bạn yêu cầu bảo mật
+      (req as any).token = token;
     }
     next();
   });
