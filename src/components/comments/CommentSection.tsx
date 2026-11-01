@@ -3,10 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { 
   MessageSquare, Send, Trash2, Edit3, CornerDownRight, Smile, Heart, ThumbsUp, Frown, Angry, Sparkles, Check, X, ShieldAlert 
 } from 'lucide-react';
-import { 
-  collection, query, where, orderBy, getDocs, addDoc, doc, updateDoc, serverTimestamp, increment 
-} from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+// Loại bỏ Firebase, dùng Supabase
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import ReportModal from '../ReportModal';
 import UserBadge from '../UserBadge';
@@ -182,7 +180,7 @@ function CommentNode({
           {isDeleted ? (
             <div className="flex items-center gap-3 text-[10px] text-neutral-400 px-1 font-semibold pt-0.5">
               <span className="text-[10px] text-neutral-400 font-normal">
-                {comment.createdAt?.toDate ? comment.createdAt.toDate().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : ''}
+                {comment.createdAt ? new Date(comment.createdAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : ''}
               </span>
             </div>
           ) : (
@@ -272,7 +270,7 @@ function CommentNode({
               )}
 
               <span className="text-[10px] text-neutral-400 font-normal">
-                {comment.createdAt?.toDate ? comment.createdAt.toDate().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : ''}
+                {comment.createdAt ? new Date(comment.createdAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : ''}
               </span>
             </div>
           )}
@@ -381,18 +379,14 @@ export default function CommentSection({
     if (!targetId) return;
     setLoading(true);
     try {
-      const q = query(
-        collection(db, 'comments'),
-        where('targetId', '==', targetId),
-        orderBy('createdAt', 'asc')
-      );
-      const snap = await getDocs(q);
-      const list: CommentItem[] = [];
-      snap.docs.forEach(dSnap => {
-        const data = dSnap.data();
-        list.push({ id: dSnap.id, ...data } as CommentItem);
-      });
-      setComments(list);
+      const { data, error } = await supabase
+        .from('comments')
+        .select('*')
+        .eq('targetId', targetId)
+        .order('createdAt', { ascending: true });
+        
+      if (error) throw error;
+      setComments((data as CommentItem[]) || []);
     } catch (err) {
       console.error("Lỗi khi tải bình luận:", err);
     } finally {
@@ -423,6 +417,7 @@ export default function CommentSection({
 
     setSubmitting(true);
     try {
+      const timestamp = new Date().toISOString();
       const commentData = {
         targetId,
         targetType,
@@ -432,21 +427,25 @@ export default function CommentSection({
         parentId: parentId || null,
         content: trimmed,
         reactions: {},
-        createdAt: serverTimestamp(),
+        createdAt: timestamp,
         deletedAt: null
       };
 
-      const commentRef = await addDoc(collection(db, 'comments'), commentData);
+      const { data: newDoc, error } = await supabase.from('comments').insert(commentData).select().single();
+      if (error) throw error;
+      const commentRef = newDoc as any;
 
       // Increment comments count on target collection if applicable
       try {
         const collectionName = targetType === 'CHARACTER' ? 'characters' : targetType === 'PROMPT' ? 'prompts' : 'feedbacks';
-        const docRef = doc(db, collectionName, targetId);
-        await updateDoc(docRef, {
-          commentsCount: increment(1)
-        });
+        // Ta phải lấy comment count hiện tại trước (vì supabase không có hàm increment mặc định dễ như firebase)
+        // Đây chỉ là bước làm tối giản, thường thì sẽ có function ở SQL làm việc này
+        const { data: currentTarget } = await supabase.from(collectionName).select('commentsCount').eq('id', targetId).single();
+        if (currentTarget) {
+           await supabase.from(collectionName).update({ commentsCount: (currentTarget.commentsCount || 0) + 1 }).eq('id', targetId);
+        }
       } catch (e) {
-        // Ignored if field doesn't exist
+        // Ignored
       }
 
       // Send notification
@@ -454,7 +453,7 @@ export default function CommentSection({
       if (parentId) {
         const parentComment = comments.find(c => c.id === parentId);
         if (parentComment && parentComment.authorId !== user.id) {
-          await addDoc(collection(db, 'notifications'), {
+          await supabase.from('notifications').insert({
             recipientId: parentComment.authorId,
             userId: parentComment.authorId,
             senderId: user.id,
@@ -467,13 +466,13 @@ export default function CommentSection({
             targetType: 'COMMENT',
             link: `/${targetType === 'CHARACTER' ? 'character' : targetType === 'PROMPT' ? 'prompt' : 'feedbacks'}/${targetId}`,
             read: false,
-            createdAt: new Date().toISOString()
+            createdAt: timestamp
           });
         }
       } 
       // Case 2: Top level comment -> Notify Target Owner/Creator
       else if (targetOwnerId && targetOwnerId !== user.id) {
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           recipientId: targetOwnerId,
           userId: targetOwnerId,
           senderId: user.id,
@@ -486,7 +485,7 @@ export default function CommentSection({
           targetType: 'COMMENT',
           link: `/${targetType === 'CHARACTER' ? 'character' : targetType === 'PROMPT' ? 'prompt' : 'feedbacks'}/${targetId}`,
           read: false,
-          createdAt: new Date().toISOString()
+          createdAt: timestamp
         });
       }
 
@@ -511,11 +510,11 @@ export default function CommentSection({
     }
 
     try {
-      const cRef = doc(db, 'comments', commentId);
-      await updateDoc(cRef, {
+      await supabase.from('comments').update({
         content: trimmed,
-        updatedAt: serverTimestamp()
-      });
+        updatedAt: new Date().toISOString()
+      }).eq('id', commentId);
+      
       toast.success("Đã cập nhật bình luận.");
       setEditingCommentId(null);
       fetchComments();
@@ -533,23 +532,23 @@ export default function CommentSection({
   const executeDeleteComment = async (commentId: string, reason?: string, details?: string) => {
     try {
       const comment = comments.find(c => c.id === commentId);
-      const cRef = doc(db, 'comments', commentId);
       const isModeratorRemoval = Boolean(isStaff && comment && comment.authorId !== user?.id);
       const removalReason = reason || (isModeratorRemoval ? "Nội dung vi phạm quy chuẩn cộng đồng" : null);
+      const timestamp = new Date().toISOString();
 
-      await updateDoc(cRef, { 
-        deletedAt: new Date().toISOString(),
+      await supabase.from('comments').update({ 
+        deletedAt: timestamp,
         deletedBy: user?.id,
         removalReason: isModeratorRemoval ? removalReason : null,
         removalDetails: isModeratorRemoval ? (details || '') : null,
-        removalTime: isModeratorRemoval ? new Date().toISOString() : null,
+        removalTime: isModeratorRemoval ? timestamp : null,
         appealStatus: isModeratorRemoval ? 'NONE' : null,
         deleteReason: removalReason
-      });
+      }).eq('id', commentId);
 
       // Send notification to author if deleted by staff
       if (isModeratorRemoval && comment && comment.authorId !== user?.id) {
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           recipientId: comment.authorId,
           userId: comment.authorId,
           senderId: user?.id,
@@ -557,7 +556,7 @@ export default function CommentSection({
           senderAvatar: DEFAULT_AVATAR,
           type: 'CONTENT_REMOVED',
           title: 'Bình luận của bạn đã bị gỡ bỏ',
-          content: `Bình luận "${comment.content.slice(0, 50)}..." đã bị gỡ bỏ do: ${removalReason}.`,
+          message: `Bình luận "${comment.content.slice(0, 50)}..." đã bị gỡ bỏ do: ${removalReason}.`,
           targetType: 'COMMENT',
           targetId: commentId,
           targetName: `Bình luận: "${comment.content.slice(0, 30)}..."`,
@@ -565,26 +564,26 @@ export default function CommentSection({
           removalDetails: details || '',
           isRead: false,
           read: false,
-          createdAt: serverTimestamp()
+          createdAt: timestamp
         });
 
         // Add audit log
-        await addDoc(collection(db, 'activity_logs'), {
-          userId: user?.id,
-          userName: user?.displayName || 'Admin/Mod',
+        await supabase.from('audit_logs').insert({
+          executorId: user?.id,
+          executorName: user?.displayName || 'Admin/Mod',
           action: 'REMOVE_COMMENT',
           details: `Gỡ bỏ bình luận của "${comment.authorName}" (ID: ${commentId}) - Lý do: ${removalReason}`,
-          timestamp: serverTimestamp()
+          createdAt: timestamp
         });
       }
 
       // Decrement counter
       try {
         const collectionName = targetType === 'CHARACTER' ? 'characters' : targetType === 'PROMPT' ? 'prompts' : 'feedbacks';
-        const docRef = doc(db, collectionName, targetId);
-        await updateDoc(docRef, {
-          commentsCount: increment(-1)
-        });
+        const { data: currentTarget } = await supabase.from(collectionName).select('commentsCount').eq('id', targetId).single();
+        if (currentTarget) {
+           await supabase.from(collectionName).update({ commentsCount: Math.max(0, (currentTarget.commentsCount || 0) - 1) }).eq('id', targetId);
+        }
       } catch (e) {
         // Ignored
       }
@@ -615,14 +614,13 @@ export default function CommentSection({
         updatedReactions[user.id] = reactionType;
       }
 
-      const cRef = doc(db, 'comments', comment.id);
-      await updateDoc(cRef, {
+      await supabase.from('comments').update({
         reactions: updatedReactions
-      });
+      }).eq('id', comment.id);
 
       // Send notification if added/changed and not self
       if (updatedReactions[user.id] && comment.authorId !== user.id) {
-        await addDoc(collection(db, 'notifications'), {
+        await supabase.from('notifications').insert({
           recipientId: comment.authorId,
           userId: comment.authorId,
           senderId: user.id,
